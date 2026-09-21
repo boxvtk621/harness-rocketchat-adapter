@@ -2,3 +2,8 @@
 **/obj/
 .git/
 TestResults/
+**/.runtime/
+**/output/
+**/node_modules/
+_bmad/
+_bmad-output/

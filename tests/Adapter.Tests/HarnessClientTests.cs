@@ -49,6 +49,7 @@ public class HarnessClientTests
                 "/prefix/health/live" => Json("{\"status\":\"live\"}"),
                 "/prefix/v1/executor/heartbeat" => Json($"{{\"nodeId\":\"11111111-1111-4111-8111-111111111111\",\"bootId\":\"22222222-2222-4222-8222-222222222222\",\"observedAt\":\"{observedAt}\",\"health\":\"live\",\"readiness\":\"ready\",\"capacity\":100}}"),
                 "/prefix/health/ready" => Json("{\"readiness\":\"ready\"}"),
+                "/prefix/v1/nodes/11111111-1111-4111-8111-111111111111/snapshot" => Json("{\"protocolVersion\":1,\"schemaId\":\"harness-wire-v2\",\"nodeId\":\"11111111-1111-4111-8111-111111111111\",\"node\":{\"occupancy\":\"active\"}}"),
                 _ => new(HttpStatusCode.NotFound)
             };
         });
@@ -59,6 +60,7 @@ public class HarnessClientTests
         Assert.True(result.Observation.Ready);
         Assert.Equal("22222222-2222-4222-8222-222222222222", result.Observation.BootId);
         Assert.Equal("100", result.Observation.Capacity);
+        Assert.Equal("active", result.Observation.Occupancy);
         Assert.Equal("compatible", result.Observation.Compatibility);
         Assert.All(handler.Requests, x => Assert.Equal("tenant=a", x.Query.TrimStart('?')));
     }
@@ -138,6 +140,28 @@ public class HarnessClientTests
         Assert.False(ObservationResponse.From(unreachable).Ready);
     }
 
+    [Fact]
+    public void Availability_distinguishes_unknown_stale_unavailable_and_available()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var connection = Connection("https://node.test/");
+        Assert.Equal("unknown", ObservationResponse.From(connection).Availability);
+
+        var stale = connection with { Observation = Observation.Unknown with
+            { AttemptedAt = now, HttpReachable = true, HeartbeatAt = now.AddHours(-1) } };
+        Assert.Equal("stale", ObservationResponse.From(stale).Availability);
+        Assert.False(ObservationResponse.From(stale).Ready);
+
+        var unavailable = connection with { Observation = Observation.Unknown with
+            { AttemptedAt = now, HttpReachable = false } };
+        Assert.Equal("unavailable", ObservationResponse.From(unavailable).Availability);
+        Assert.False(ObservationResponse.From(unavailable).Ready);
+
+        var available = connection with { Observation = Observation.Unknown with
+            { AttemptedAt = now, HttpReachable = true, HeartbeatAt = now } };
+        Assert.Equal("available", ObservationResponse.From(available).Availability);
+    }
+
     private static Task<HarnessProbeResult> ProbeWithHeartbeat(string heartbeat)
     {
         var handler = new ScriptedHandler(request => request.RequestUri!.AbsolutePath switch
@@ -199,7 +223,7 @@ public class EpochFencingTests
         var store = new MemoryConnectionRepository();
         var now = DateTimeOffset.UtcNow;
         var old = new Connection("c1", "one", "https://old.test/", 1, ObservationSettings.Default, Observation.Unknown, now, now);
-        await store.CreateAsync(old, default);
+        await store.CreateOrGetAsync(old, default);
         var current = old with { BaseUri = "https://new.test/", ConfigEpoch = 2, Observation = Observation.Unknown };
         Assert.True(await store.ReplaceAsync(current, 1, default));
         var stale = Observation.Unknown with { AttemptedAt = now, HttpReachable = true, Compatibility = "compatible" };

@@ -61,9 +61,12 @@ public sealed class HarnessEventInvalidationService(
         {
             do
             {
-                var current = (await connections.ListAsync(stoppingToken))
+                var listed = await connections.ListAsync(stoppingToken);
+                var conflictingIds = ConnectionIdentity.FindConflicts(listed)
+                    .SelectMany(x => x.ConnectionIds).ToHashSet(StringComparer.Ordinal);
+                var current = listed
                     .Where(x => x.Observation.Compatibility == "compatible" &&
-                                Guid.TryParse(x.Observation.NodeId, out _))
+                                Guid.TryParse(x.Observation.NodeId, out _) && !conflictingIds.Contains(x.Id))
                     .ToDictionary(x => x.Id, StringComparer.Ordinal);
                 foreach (var item in workers.ToArray())
                 {
@@ -73,6 +76,14 @@ public sealed class HarnessEventInvalidationService(
                     {
                         item.Value.Stop.Cancel();
                         workers.Remove(item.Key);
+                        try { await item.Value.Task; }
+                        catch (OperationCanceledException) when (item.Value.Stop.IsCancellationRequested) { }
+                        catch (Exception ex)
+                        {
+                            logger.LogWarning("Retired Harness event worker failed for connection {ConnectionId}: {ErrorType}",
+                                item.Key, ex.GetType().Name);
+                        }
+                        item.Value.Stop.Dispose();
                     }
                 }
                 foreach (var connection in current.Values)
@@ -131,12 +142,14 @@ public sealed class HarnessEventInvalidationService(
     }
 }
 
-public sealed record WorkProjection(string ConnectionId, string NodeId, string RequestId, string DialogId,
-    string Status, long Version, long QueueSequence, AttemptProjection? ActiveAttempt);
-public sealed record AttemptProjection(string AttemptId, string RequestId, string State, string EffectStatus,
+public sealed record WorkProjection(string ConnectionId, string NodeId, string NodeName, string RequestId,
+    string DialogId, string? Title, string Status, long Version, long QueueSequence,
+    DateTimeOffset? ObservedAt, bool AttentionRequired, AttemptProjection? ActiveAttempt);
+public sealed record AttemptProjection(string AttemptId, string RequestId, string? DialogId, string State, string EffectStatus,
     long Generation, long Version, string? StartedAt, string? FinishedAt);
-public sealed record HistoryProjection(string ConnectionId, string NodeId, string DialogId, string? Title,
-    long DialogVersion, string CreatedAt, IReadOnlyList<MessageProjection> Messages);
+public sealed record HistoryProjection(string ConnectionId, string NodeId, string NodeName, string RequestId,
+    string DialogId, string Status, string? Title, long DialogVersion, string? CreatedAt, string? CompletedAt,
+    IReadOnlyList<AttemptProjection> Attempts, IReadOnlyList<MessageProjection> Messages);
 public sealed record MessageProjection(string MessageId, string Role, long Sequence, long Version,
     string CreatedAt, string? Text, JsonElement? Content, string? RequestId, string? AttemptId);
 public sealed class ProjectionUnavailableException(string message) : Exception(message);
@@ -144,7 +157,7 @@ public sealed class ProjectionUnavailableException(string message) : Exception(m
 public static class HarnessProjectionReader
 {
     private static readonly HashSet<string> ActiveRequestStates = new(StringComparer.Ordinal)
-        { "queued", "dispatching", "active" };
+        { "queued", "dispatching", "active", "unknown" };
     private static readonly HashSet<string> TerminalRequestStates = new(StringComparer.Ordinal)
         { "cancelled", "completed", "failed", "interrupted" };
 
@@ -157,6 +170,10 @@ public static class HarnessProjectionReader
             var nodeId = connection.Observation.NodeId!;
             var requests = await ReadAllItemsAsync(connection, client,
                 ["v1", "nodes", nodeId, "requests"], ct);
+            var dialogs = (await ReadAllItemsAsync(connection, client,
+                ["v1", "nodes", nodeId, "dialogs"], ct))
+                .Where(x => String(x, "dialogId") is not null)
+                .ToDictionary(x => String(x, "dialogId")!, StringComparer.Ordinal);
             using var snapshot = await client.GetAsync(connection, ["v1", "nodes", nodeId, "snapshot"], null, ct);
             var active = snapshot is null ? null : ParseAttempt(snapshot.RootElement.TryGetProperty("activeAttempt", out var a) ? a : default);
             foreach (var item in requests)
@@ -164,12 +181,17 @@ public static class HarnessProjectionReader
                 var requestId = String(item, "requestId");
                 var status = String(item, "status");
                 if (requestId is null || status is null || !ActiveRequestStates.Contains(status)) continue;
-                result.Add(new(connection.Id, nodeId, requestId, String(item, "dialogId") ?? "",
-                    status, Long(item, "version"), Long(item, "queueSequence"),
+                var dialogId = String(item, "dialogId") ?? "";
+                if (!dialogs.TryGetValue(dialogId, out var dialog))
+                    throw new ProjectionUnavailableException("Active request refers to a missing dialog.");
+                result.Add(new(connection.Id, nodeId, connection.Name, requestId, dialogId,
+                    String(dialog, "title"),
+                    status, Long(item, "version"), Long(item, "queueSequence"), connection.Observation.AttemptedAt,
+                    status == "unknown",
                     active?.RequestId == requestId ? active : null));
             }
         }
-        return result;
+        return result.GroupBy(x => (x.NodeId, x.RequestId)).Select(x => x.First()).ToList();
     }
 
     public static async Task<IReadOnlyList<HistoryProjection>> ReadHistoryAsync(
@@ -181,21 +203,45 @@ public static class HarnessProjectionReader
             var nodeId = connection.Observation.NodeId!;
             var requests = await ReadAllItemsAsync(connection, client,
                 ["v1", "nodes", nodeId, "requests"], ct);
-            var completedDialogs = requests.Where(x => TerminalRequestStates.Contains(String(x, "status") ?? ""))
-                .Select(x => String(x, "dialogId")).Where(x => x is not null).ToHashSet(StringComparer.Ordinal);
+            var terminalRequests = requests.Where(x => TerminalRequestStates.Contains(String(x, "status") ?? ""))
+                .Where(x => String(x, "requestId") is not null && String(x, "dialogId") is not null).ToList();
             var dialogs = await ReadAllItemsAsync(connection, client,
                 ["v1", "nodes", nodeId, "dialogs"], ct);
-            foreach (var dialog in dialogs)
+            var dialogsById = dialogs.Where(x => String(x, "dialogId") is not null)
+                .ToDictionary(x => String(x, "dialogId")!, StringComparer.Ordinal);
+            var messagesByDialog = new Dictionary<string, IReadOnlyList<JsonElement>>(StringComparer.Ordinal);
+            foreach (var request in terminalRequests)
             {
-                var dialogId = String(dialog, "dialogId");
-                if (dialogId is null || !completedDialogs.Contains(dialogId)) continue;
-                var messages = await ReadAllItemsAsync(connection, client,
-                    ["v1", "nodes", nodeId, "dialogs", dialogId, "messages"], ct);
-                result.Add(new(connection.Id, nodeId, dialogId, String(dialog, "title"), Long(dialog, "version"),
-                    String(dialog, "createdAt") ?? "", ParseMessages(messages)));
+                var requestId = String(request, "requestId")!;
+                var dialogId = String(request, "dialogId")!;
+                var inputMessageId = String(request, "inputMessageId")!;
+                if (!dialogsById.TryGetValue(dialogId, out var dialog))
+                    throw new ProjectionUnavailableException("Terminal request refers to a missing dialog.");
+                if (!messagesByDialog.TryGetValue(dialogId, out var allMessages))
+                {
+                    allMessages = await ReadAllItemsAsync(connection, client,
+                        ["v1", "nodes", nodeId, "dialogs", dialogId, "messages"], ct);
+                    messagesByDialog[dialogId] = allMessages;
+                }
+                var attemptItems = await ReadAllItemsAsync(connection, client,
+                    ["v1", "nodes", nodeId, "requests", requestId, "attempts"], ct);
+                if (attemptItems.Any(x => String(x, "dialogId") != dialogId))
+                    throw new ProjectionUnavailableException("Request attempt belongs to another dialog.");
+                var attempts = attemptItems.Select(ParseAttempt).Where(x => x is not null).Cast<AttemptProjection>().ToList();
+                var attemptIds = attempts.Select(x => x.AttemptId).ToHashSet(StringComparer.Ordinal);
+                var scopedMessages = allMessages.Where(x => String(x, "messageId") == inputMessageId ||
+                    String(x, "requestId") == requestId ||
+                    (String(x, "attemptId") is { } attemptId && attemptIds.Contains(attemptId))).ToList();
+                var createdAt = scopedMessages.Where(x => String(x, "messageId") == inputMessageId)
+                    .Select(x => String(x, "createdAt")).FirstOrDefault(x => x is not null);
+                var completedAt = attempts.Where(x => DateTimeOffset.TryParse(x.FinishedAt, out _))
+                    .OrderByDescending(x => DateTimeOffset.Parse(x.FinishedAt!)).Select(x => x.FinishedAt).FirstOrDefault();
+                result.Add(new(connection.Id, nodeId, connection.Name, requestId, dialogId,
+                    String(request, "status")!, String(dialog, "title"), Long(dialog, "version"), createdAt,
+                    completedAt, attempts, ParseMessages(scopedMessages)));
             }
         }
-        return result;
+        return result.GroupBy(x => (x.NodeId, x.RequestId)).Select(x => x.First()).ToList();
     }
 
     private static IEnumerable<Connection> Eligible(IEnumerable<Connection> connections) => connections.Where(x =>
@@ -221,7 +267,13 @@ public static class HarnessProjectionReader
         var result = new List<JsonElement>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
         string? cursor = null;
-        var expectedPageType = path[^1] == "requests" ? "requests" : path[^1] == "dialogs" ? "dialogs" : "history";
+        var expectedPageType = path[^1] switch
+        {
+            "requests" => "requests",
+            "dialogs" => "dialogs",
+            "attempts" => "attempts",
+            _ => "history"
+        };
         for (var page = 0; page < 10_000; page++)
         {
             var response = await client.GetResultAsync(connection, path,
@@ -238,6 +290,8 @@ public static class HarnessProjectionReader
                 nextProperty.ValueKind is not (JsonValueKind.Null or JsonValueKind.String) ||
                 (nextProperty.ValueKind == JsonValueKind.String && string.IsNullOrEmpty(nextProperty.GetString())) ||
                 (expectedPageType == "history" && String(root, "dialogId") != path[^2]) ||
+                (expectedPageType == "attempts" &&
+                    (String(root, "dialogId") is null || String(root, "requestId") != path[^2])) ||
                 !root.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Array)
                 throw new ProjectionUnavailableException("Harness projection envelope is invalid or belongs to another node.");
             foreach (var item in items.EnumerateArray()) ValidateItem(item, expectedPageType, path);
@@ -262,12 +316,19 @@ public static class HarnessProjectionReader
                          String(item, "dialogId") == path[^2] && Integer(item, "sequence", 1) &&
                          Integer(item, "version", 0) && Date(item, "createdAt") &&
                          (String(item, "role") is "user" or "assistant" or "system" or "tool"),
+            "attempts" => Uuid(item, "attemptId") && Uuid(item, "dialogId") &&
+                          Uuid(item, "requestId") && String(item, "requestId") == path[^2] &&
+                          Integer(item, "generation", 1) && Integer(item, "version", 0) &&
+                          (String(item, "state") is "dispatching" or "running" or "waiting_input" or
+                           "stopping" or "completed" or "failed" or "interrupted" or "unknown") &&
+                          (String(item, "effectStatus") is "none" or "known" or "unknown"),
             _ => false
         };
         if (!valid) throw new ProjectionUnavailableException("Harness projection item is invalid.");
     }
 
-    private static bool Uuid(JsonElement item, string name) => Guid.TryParse(String(item, name), out _);
+    private static bool Uuid(JsonElement item, string name) => String(item, name) is { } value &&
+        Guid.TryParse(value, out var parsed) && string.Equals(value, parsed.ToString("D"), StringComparison.Ordinal);
     private static bool Date(JsonElement item, string name) => DateTimeOffset.TryParse(String(item, name), out _);
     private static bool Integer(JsonElement item, string name, long minimum) =>
         item.ValueKind == JsonValueKind.Object && item.TryGetProperty(name, out var value) &&
@@ -290,7 +351,7 @@ public static class HarnessProjectionReader
     private static AttemptProjection? ParseAttempt(JsonElement item)
     {
         if (item.ValueKind != JsonValueKind.Object || String(item, "attemptId") is not { } id) return null;
-        return new(id, String(item, "requestId") ?? "", String(item, "state") ?? "unknown",
+        return new(id, String(item, "requestId") ?? "", String(item, "dialogId"), String(item, "state") ?? "unknown",
             String(item, "effectStatus") ?? "unknown", Long(item, "generation"), Long(item, "version"),
             String(item, "startedAt"), String(item, "finishedAt"));
     }

@@ -96,6 +96,8 @@ async Task ProxyToAdapter(HttpContext context, IHttpClientFactory factory, strin
     using var response = await factory.CreateClient("adapter").SendAsync(request, HttpCompletionOption.ResponseHeadersRead, context.RequestAborted);
     context.Response.StatusCode = (int)response.StatusCode;
     context.Response.ContentType = response.Content.Headers.ContentType?.ToString() ?? "application/json";
+    if (response.Headers.TryGetValues("X-Connection-Reused", out var reused))
+        context.Response.Headers["X-Connection-Reused"] = reused.ToArray();
     await response.Content.CopyToAsync(context.Response.Body, context.RequestAborted);
 }
 

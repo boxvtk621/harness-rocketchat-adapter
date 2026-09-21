@@ -1,14 +1,48 @@
 [CmdletBinding()]
 param(
-    [switch]$Start
+    [switch]$Start,
+    [Parameter(Mandatory = $true)][string]$ProjectName,
+    [int]$ClientPort = 18505,
+    [int]$KeycloakPort = 18585,
+    [string]$CursorContext,
+    [string]$CodexContext
 )
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
+if ($ProjectName -notmatch '^hl305-[a-z0-9-]+$') { throw 'Use a dedicated hl305-* project for acceptance.' }
+if ($ClientPort -lt 1024 -or $ClientPort -gt 65535 -or $KeycloakPort -lt 1024 -or $KeycloakPort -gt 65535) { throw 'Use unprivileged valid TCP ports.' }
+if ($ClientPort -eq 18100 -or $KeycloakPort -eq 18180 -or $ClientPort -eq $KeycloakPort) { throw 'Acceptance ports must differ from the working stack.' }
+& (Join-Path $PSScriptRoot 'assert-isolated-owner.ps1') -ProjectName $ProjectName -ProjectRoot $root
+if (-not $CursorContext -or -not $CodexContext) {
+    $ancestor = Get-Item -LiteralPath $root
+    while ($ancestor -and -not (Test-Path (Join-Path $ancestor.FullName 'harness-cursor/delivery/Dockerfile.cursor'))) { $ancestor = $ancestor.Parent }
+    if (-not $ancestor) { throw 'Specify existing Harness source paths with -CursorContext and -CodexContext.' }
+    if (-not $CursorContext) { $CursorContext = Join-Path $ancestor.FullName 'harness-cursor' }
+    if (-not $CodexContext) { $CodexContext = Join-Path $ancestor.FullName 'harness-codex' }
+}
 $secretsDir = Join-Path $root '.runtime\secrets'
 $harnessDir = Join-Path $root '.runtime\harness'
 New-Item -ItemType Directory -Force -Path $secretsDir | Out-Null
 New-Item -ItemType Directory -Force -Path $harnessDir | Out-Null
+$clientDir = Join-Path $root '.runtime/client'
+New-Item -ItemType Directory -Force -Path $clientDir | Out-Null
+$runtime = 'window.__HARNESS_CONFIG__ = ' + (@{ oidcAuthority = "http://localhost:$KeycloakPort/realms/harness"; oidcClientId = 'harness-web' } | ConvertTo-Json -Compress) + ';'
+$environmentFile = Join-Path $root '.runtime/acceptance.env'
+$environmentText = @(
+    "COMPOSE_PROJECT_NAME=$ProjectName", "HL304_VOLUME_PREFIX=$ProjectName",
+    "WEB_CLIENT_PORT=$ClientPort", "WEB_KEYCLOAK_PORT=$KeycloakPort", 'ACCEPTANCE_ISOLATED=true',
+    'CLIENT_RUNTIME_CONFIG=./.runtime/client/runtime-config.js',
+    ('HARNESS_CURSOR_CONTEXT=' + $CursorContext.Replace('\','/')),
+    ('HARNESS_CODEX_CONTEXT=' + $CodexContext.Replace('\','/'))
+) -join "`n"
+if (Test-Path $environmentFile) {
+    $existingLines = @(Get-Content $environmentFile | Where-Object { $_.Trim() } | Sort-Object)
+    $requestedLines = @($environmentText -split "`n" | Sort-Object)
+    if (Compare-Object $existingLines $requestedLines) { throw 'Existing acceptance wiring belongs to another configuration; reuse its exact parameters.' }
+}
+[IO.File]::WriteAllText($environmentFile, $environmentText + "`n")
+[IO.File]::WriteAllText((Join-Path $clientDir 'runtime-config.js'), $runtime)
 
 function New-RandomSecret([int]$bytes = 32) {
     $buffer = New-Object byte[] $bytes
@@ -51,8 +85,15 @@ if (-not (Test-Path -LiteralPath $serverCert) -or -not (Test-Path -LiteralPath $
 Write-Host 'Local bootstrap secrets are ready in the gitignored .runtime/secrets directory.'
 Write-Host 'An isolated local Harness TLS certificate is ready; the Cursor fixture key is not a provider credential.'
 Write-Host 'Keycloak user: operator'
-Write-Host "Keycloak initial password: $devPassword"
+Write-Host 'Keycloak password is in .runtime/secrets/keycloak_dev_user_password.'
 
 if ($Start) {
-    docker compose --project-directory $root -f (Join-Path $root 'compose.yaml') --profile harness up --build -d
+    $effective = docker compose --env-file $environmentFile --project-directory $root -f (Join-Path $root 'compose.yaml') --profile harness config --format json | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0 -or $effective.name -ne $ProjectName) { throw 'Effective Compose project differs from bootstrap parameters.' }
+    foreach ($resource in @($effective.volumes.PSObject.Properties) + @($effective.networks.PSObject.Properties)) {
+        if (-not $resource.Value.name.StartsWith($ProjectName + '-')) { throw 'Effective volume or network is outside this project.' }
+    }
+    if ([int]$effective.services.client.ports[0].published -ne $ClientPort -or [int]$effective.services.keycloak.ports[0].published -ne $KeycloakPort) { throw 'Effective ports differ from bootstrap parameters.' }
+    docker compose --env-file $environmentFile --project-directory $root -f (Join-Path $root 'compose.yaml') --profile harness up --build -d
+    if ($LASTEXITCODE -ne 0) { throw 'Isolated stack startup failed.' }
 }

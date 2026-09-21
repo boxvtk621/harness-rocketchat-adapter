@@ -20,13 +20,15 @@ Health endpoints are unauthenticated: `GET /health/live` and `GET /health/ready`
 
 - `GET /api/connections/` — list registry entries and current observations
 - `GET /api/connections/{id}` — fetch an entry
-- `POST /api/connections/` — register a base URI and independent observation interval, request timeout and stale threshold
+- `POST /api/connections/` — register a base URI and independent observation interval, request timeout and stale threshold; an identical canonical endpoint returns the existing connection with HTTP 200 and `X-Connection-Reused: true`
 - `PUT /api/connections/{id}` — update the same settings; increments `configEpoch`
 - `GET /api/projections/nodes` — reachability, health, readiness/capacity, heartbeat freshness, boot identity and compatibility
 - `GET /api/projections/work` — provider-neutral active work items
-- `GET /api/projections/history` — provider-neutral completed work items
+- `GET /api/projections/history` — provider-neutral completed requests, including request-scoped attempts and messages
 
-Base paths and queries are retained when Harness endpoint paths are joined. Redirects, URI userinfo/fragments, non-HTTPS schemes, private-network destinations outside the exact allowlist, cookies and credential forwarding are refused. A compare-and-set `configEpoch` prevents a late response for an old URI from overwriting a newer observation. SSE keepalive is never treated as executor heartbeat.
+Endpoint identity is the validated canonical absolute URI including its full path and query. Path case and query order remain significant, so independently hosted nodes below different paths are supported. MongoDB enforces this identity for concurrent registration; legacy duplicate endpoint documents are represented once by Adapter without deleting source data. If distinct endpoints report one `nodeId`, Nodes exposes a `node_id_conflict` diagnostic and Work/History return HTTP 409 instead of duplicating or hiding accepted work.
+
+Base paths and queries are retained when Harness endpoint paths are joined. Redirects, URI userinfo/fragments, non-HTTPS schemes, private-network destinations outside the exact allowlist, cookies and credential forwarding are refused. A compare-and-set `configEpoch` prevents a late response for an old URI from overwriting a newer observation. SSE keepalive is never treated as executor heartbeat. Availability is reported as `unknown`, `available`, `stale`, or `unavailable`; executor occupancy is taken only from the public snapshot (`idle`, `active`, or `unknown`) and is not inferred from readiness or queue capacity.
 
 ## Build and test
 

@@ -100,8 +100,10 @@ public sealed class HarnessClient(HttpClient http, IOptions<HarnessOptions> opti
             var root = identity.RootElement;
             var protocol = GetInt(root, "protocolVersion");
             var schema = GetString(root, "schemaId");
-            var nodeId = GetString(root, "nodeId");
-            var compatible = protocol == ProtocolVersion && schema == SchemaId && Guid.TryParse(nodeId, out _);
+            var reportedNodeId = GetString(root, "nodeId");
+            var nodeIdValid = Guid.TryParse(reportedNodeId, out var parsedNodeId);
+            var compatible = protocol == ProtocolVersion && schema == SchemaId && nodeIdValid;
+            var nodeId = compatible ? parsedNodeId.ToString("D") : reportedNodeId;
             if (!compatible)
                 return new(new(now, null, true, null, false, null, null, null, nodeId, protocol, schema, "incompatible", "contract_mismatch"));
 
@@ -112,7 +114,9 @@ public sealed class HarnessClient(HttpClient http, IOptions<HarnessOptions> opti
 
             using var heartbeat = await GetRequiredAsync(connection, ["v1", "executor", "heartbeat"], null, timeout.Token);
             var heartbeatRoot = heartbeat.RootElement;
-            if (!string.Equals(GetString(heartbeatRoot, "nodeId"), nodeId, StringComparison.Ordinal))
+            var heartbeatNodeId = GetString(heartbeatRoot, "nodeId");
+            if (!Guid.TryParse(heartbeatNodeId, out var parsedHeartbeatNodeId) ||
+                !string.Equals(parsedHeartbeatNodeId.ToString("D"), nodeId, StringComparison.Ordinal))
                 return new(new(now, null, true, false, false, null, null, null, nodeId, protocol, schema, "incompatible", "heartbeat_identity_mismatch"));
             var heartbeatHealth = GetString(heartbeatRoot, "health");
             var executorHealthy = liveHealthy && string.Equals(heartbeatHealth, "live", StringComparison.OrdinalIgnoreCase);
@@ -132,9 +136,24 @@ public sealed class HarnessClient(HttpClient http, IOptions<HarnessOptions> opti
                           string.Equals(readiness, "ready", StringComparison.OrdinalIgnoreCase) &&
                           string.Equals(heartbeatReadiness, "ready", StringComparison.OrdinalIgnoreCase);
             var capacity = Scalar(heartbeatRoot, "capacity") ?? Scalar(readyRoot, "capacity");
+            var occupancy = "unknown";
+            var snapshot = await GetResultAsync(connection, ["v1", "nodes", nodeId!, "snapshot"], null, timeout.Token);
+            using (snapshot.Document)
+            {
+                if (snapshot.StatusCode == 200 && snapshot.Document is { } snapshotDocument)
+                {
+                    var snapshotRoot = snapshotDocument.RootElement;
+                    var reported = snapshotRoot.TryGetProperty("node", out var node) ? GetString(node, "occupancy") : null;
+                    if (GetInt(snapshotRoot, "protocolVersion") == ProtocolVersion &&
+                        GetString(snapshotRoot, "schemaId") == SchemaId &&
+                        GetString(snapshotRoot, "nodeId") == nodeId &&
+                        reported is "idle" or "active" or "unknown")
+                        occupancy = reported;
+                }
+            }
             return new(new(now, now, true, executorHealthy, isReady, capacity, heartbeatAt, bootId,
                 nodeId, protocol, schema, heartbeatContractValid ? "compatible" : "incompatible",
-                heartbeatContractValid ? null : "heartbeat_contract_mismatch"));
+                heartbeatContractValid ? null : "heartbeat_contract_mismatch", occupancy));
         }
         catch (HarnessHttpException ex)
         {

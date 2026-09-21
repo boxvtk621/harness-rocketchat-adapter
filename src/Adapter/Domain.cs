@@ -11,7 +11,7 @@ public sealed record ObservationSettings(int IntervalSeconds, int TimeoutSeconds
 public sealed record Observation(DateTimeOffset? AttemptedAt, DateTimeOffset? SuccessfulAt,
     bool? HttpReachable, bool? ExecutorHealthy, bool? Ready, string? Capacity,
     DateTimeOffset? HeartbeatAt, string? BootId, string? NodeId, int? ProtocolVersion,
-    string? SchemaId, string Compatibility, string? ErrorCode)
+    string? SchemaId, string Compatibility, string? ErrorCode, string Occupancy = "unknown")
 {
     public static readonly Observation Unknown = new(null, null, null, null, null, null, null, null, null, null, null, "unknown", null);
 }
@@ -19,10 +19,62 @@ public sealed record Observation(DateTimeOffset? AttemptedAt, DateTimeOffset? Su
 public sealed record Connection(string Id, string Name, string BaseUri, long ConfigEpoch,
     ObservationSettings Settings, Observation Observation, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt);
 
+public sealed record ConnectionIdentityInfo(string EndpointKey, string Status,
+    IReadOnlyList<string> ConflictingConnectionIds);
+
+public sealed record NodeIdentityConflict(string NodeId, IReadOnlyList<string> ConnectionIds,
+    IReadOnlyList<string> BaseUris);
+
+public static class ConnectionIdentity
+{
+    public const string Unverified = "unverified";
+    public const string Unique = "unique";
+    public const string NodeIdConflict = "node_id_conflict";
+
+    // BaseUri has already been canonicalized by ConnectionInput. Keeping it whole is intentional:
+    // path case, escaped path data, query order and query values are part of endpoint identity.
+    public static string EndpointKey(Connection value) => value.BaseUri;
+
+    public static IReadOnlyDictionary<string, ConnectionIdentityInfo> Analyze(IEnumerable<Connection> values)
+    {
+        var connections = values.ToList();
+        var conflicts = connections
+            .Where(x => x.Observation.Compatibility == "compatible" && Guid.TryParse(x.Observation.NodeId, out _))
+            .GroupBy(x => Guid.Parse(x.Observation.NodeId!).ToString("D"), StringComparer.OrdinalIgnoreCase)
+            .Where(x => x.Count() > 1)
+            .SelectMany(group =>
+            {
+                var ids = group.Select(x => x.Id).Order(StringComparer.Ordinal).ToArray();
+                return group.Select(x => new KeyValuePair<string, ConnectionIdentityInfo>(x.Id,
+                    new(EndpointKey(x), NodeIdConflict, ids)));
+            }).ToDictionary(x => x.Key, x => x.Value, StringComparer.Ordinal);
+
+        foreach (var connection in connections)
+        {
+            if (conflicts.ContainsKey(connection.Id)) continue;
+            var verified = connection.Observation.Compatibility == "compatible" &&
+                           Guid.TryParse(connection.Observation.NodeId, out _);
+            conflicts[connection.Id] = new(EndpointKey(connection), verified ? Unique : Unverified, []);
+        }
+        return conflicts;
+    }
+
+    public static IReadOnlyList<NodeIdentityConflict> FindConflicts(IEnumerable<Connection> values) => values
+        .Where(x => x.Observation.Compatibility == "compatible" && Guid.TryParse(x.Observation.NodeId, out _))
+        .GroupBy(x => Guid.Parse(x.Observation.NodeId!).ToString("D"), StringComparer.OrdinalIgnoreCase)
+        .Where(x => x.Count() > 1)
+        .Select(group => new NodeIdentityConflict(group.Key,
+            group.Select(x => x.Id).Order(StringComparer.Ordinal).ToArray(),
+            group.Select(x => x.BaseUri).Order(StringComparer.Ordinal).ToArray()))
+        .OrderBy(x => x.NodeId, StringComparer.Ordinal)
+        .ToArray();
+}
+
 public sealed record ObservationResponse(DateTimeOffset? AttemptedAt, DateTimeOffset? SuccessfulAt,
     bool? HttpReachable, bool? ExecutorHealthy, bool? Ready, string? Capacity,
     DateTimeOffset? HeartbeatAt, bool? HeartbeatFresh, string? BootId, string? NodeId,
-    int? ProtocolVersion, string? SchemaId, string Compatibility, string? ErrorCode)
+    int? ProtocolVersion, string? SchemaId, string Compatibility, string? ErrorCode, string Availability,
+    string Occupancy)
 {
     public static ObservationResponse From(Connection value)
     {
@@ -33,25 +85,34 @@ public sealed record ObservationResponse(DateTimeOffset? AttemptedAt, DateTimeOf
             observation.HttpReachable == true && observation.ExecutorHealthy == true && fresh == true && Guid.TryParse(observation.BootId, out _)
                 ? observation.Ready
                 : false;
+        var availability = observation.AttemptedAt is null ? "unknown" :
+            observation.HttpReachable != true ? "unavailable" : fresh == false ? "stale" : "available";
         return new(observation.AttemptedAt, observation.SuccessfulAt, observation.HttpReachable,
             observation.ExecutorHealthy, ready, observation.Capacity, observation.HeartbeatAt, fresh,
             observation.BootId, observation.NodeId, observation.ProtocolVersion, observation.SchemaId,
-            observation.Compatibility, observation.ErrorCode);
+            observation.Compatibility, observation.ErrorCode, availability, observation.Occupancy);
     }
 }
 
 public sealed record ConnectionResponse(string Id, string Name, string BaseUri, long ConfigEpoch,
     int ObservationIntervalSeconds, int RequestTimeoutSeconds, int StaleThresholdSeconds,
-    ObservationResponse Observation, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt)
+    ObservationResponse Observation, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt,
+    string EndpointKey, string IdentityStatus, IReadOnlyList<string> ConflictingConnectionIds)
 {
-    public static ConnectionResponse From(Connection value) => new(value.Id, value.Name, value.BaseUri,
+    public static ConnectionResponse From(Connection value, ConnectionIdentityInfo? identity = null) => new(value.Id, value.Name, value.BaseUri,
         value.ConfigEpoch, value.Settings.IntervalSeconds, value.Settings.TimeoutSeconds,
-        value.Settings.StaleThresholdSeconds, ObservationResponse.From(value), value.CreatedAt, value.UpdatedAt);
+        value.Settings.StaleThresholdSeconds, ObservationResponse.From(value), value.CreatedAt, value.UpdatedAt,
+        identity?.EndpointKey ?? ConnectionIdentity.EndpointKey(value), identity?.Status ?? ConnectionIdentity.Unverified,
+        identity?.ConflictingConnectionIds ?? []);
 }
 
-public sealed record NodeProjection(string ConnectionId, string Name, long ConfigEpoch, ObservationResponse Observation)
+public sealed record NodeProjection(string ConnectionId, string Name, string BaseUri, long ConfigEpoch,
+    ObservationResponse Observation, string EndpointKey, string IdentityStatus,
+    IReadOnlyList<string> ConflictingConnectionIds)
 {
-    public static NodeProjection From(Connection value) => new(value.Id, value.Name, value.ConfigEpoch, ObservationResponse.From(value));
+    public static NodeProjection From(Connection value, ConnectionIdentityInfo identity) => new(value.Id, value.Name,
+        value.BaseUri, value.ConfigEpoch, ObservationResponse.From(value), identity.EndpointKey, identity.Status,
+        identity.ConflictingConnectionIds);
 }
 
 public static class ConnectionInput

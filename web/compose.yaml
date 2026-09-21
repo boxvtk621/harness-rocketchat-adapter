@@ -1,4 +1,4 @@
-name: hl304
+name: ${COMPOSE_PROJECT_NAME:-hl304}
 
 services:
   client:
@@ -6,7 +6,10 @@ services:
       context: ./src/Client
     restart: unless-stopped
     ports:
-      - "127.0.0.1:18100:8080"
+      - "127.0.0.1:${WEB_CLIENT_PORT:-18100}:8080"
+    configs:
+      - source: client_runtime
+        target: /usr/share/nginx/html/runtime-config.js
     depends_on:
       - gateway
       - centrifugo
@@ -24,7 +27,7 @@ services:
       ADAPTER_BASE_URL: http://adapter:8080/
       ADAPTER_INTERNAL_TOKEN_FILE: /run/secrets/adapter_internal_token
       OIDC_METADATA_ADDRESS: http://keycloak:8080/realms/harness/.well-known/openid-configuration
-      OIDC_ISSUER: http://localhost:18180/realms/harness
+      OIDC_ISSUER: http://localhost:${WEB_KEYCLOAK_PORT:-18180}/realms/harness
       OIDC_AUDIENCE: harness-web
       CENTRIFUGO_CLIENT_TOKEN_SECRET_FILE: /run/secrets/centrifugo_client_secret
     secrets: [adapter_internal_token, centrifugo_client_secret]
@@ -81,6 +84,7 @@ services:
       KC_HEALTH_ENABLED: "true"
       KC_HTTP_ENABLED: "true"
       DEV_USER_USERNAME: operator
+      WEB_ORIGIN: http://localhost:${WEB_CLIENT_PORT:-18100}
     secrets: [keycloak_admin_password, keycloak_dev_user_password]
     configs:
       - source: keycloak_start
@@ -89,7 +93,7 @@ services:
       - source: keycloak_realm
         target: /opt/keycloak/data/import/harness-realm.json
     ports:
-      - "127.0.0.1:18180:8080"
+      - "127.0.0.1:${WEB_KEYCLOAK_PORT:-18180}:8080"
     command: ["start-dev", "--import-realm"]
     volumes:
       - keycloak-data:/opt/keycloak/data
@@ -101,6 +105,8 @@ services:
   centrifugo:
     image: centrifugo/centrifugo:v5.4.8
     restart: unless-stopped
+    environment:
+      WEB_ORIGIN: http://localhost:${WEB_CLIENT_PORT:-18100}
     entrypoint: ["/bin/sh", "/centrifugo/bootstrap/start.sh"]
     secrets: [centrifugo_client_secret, centrifugo_api_key]
     configs:
@@ -115,7 +121,7 @@ services:
   cursor-harness:
     profiles: ["harness"]
     build:
-      context: ../../harness-cursor
+      context: ${HARNESS_CURSOR_CONTEXT:-../../harness-cursor}
       dockerfile: delivery/Dockerfile.cursor
     restart: unless-stopped
     user: "0:0"
@@ -149,7 +155,7 @@ services:
   codex-harness:
     profiles: ["harness"]
     build:
-      context: ../../harness-codex
+      context: ${HARNESS_CODEX_CONTEXT:-../../harness-codex}
       dockerfile: Dockerfile
     restart: unless-stopped
     user: "0:0"
@@ -184,11 +190,15 @@ services:
     build:
       context: ./tests/e2e
     environment:
-      BASE_URL: http://localhost:18100
+      BASE_URL: http://localhost:${WEB_CLIENT_PORT:-18100}
       DEV_USER_USERNAME: operator
       DEV_USER_PASSWORD_FILE: /run/secrets/keycloak_dev_user_password
       HARNESS_CA_FILE: /run/config/harness_server_cert
       OUTPUT_DIR: /output
+      API_BASE_URL: http://host.docker.internal:${WEB_CLIENT_PORT:-18100}
+      ACCEPTANCE_ISOLATED: ${ACCEPTANCE_ISOLATED:-false}
+      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-hl304}
+      ACCEPTANCE_PROJECT_NAMESPACE: ${COMPOSE_PROJECT_NAME:-hl304}
     secrets: [keycloak_dev_user_password]
     configs:
       - source: harness_server_cert
@@ -206,6 +216,8 @@ services:
         limits: { memory: 768M, cpus: "1.00" }
 
 configs:
+  client_runtime:
+    file: ${CLIENT_RUNTIME_CONFIG:-./src/Client/public/runtime-config.js}
   keycloak_start:
     file: ./infra/keycloak/start.sh
   keycloak_realm:
@@ -247,10 +259,10 @@ volumes:
 
 networks:
   web:
-    name: hl304-web
+    name: ${COMPOSE_PROJECT_NAME:-hl304}-web
   internal:
-    name: hl304-internal
+    name: ${COMPOSE_PROJECT_NAME:-hl304}-internal
     internal: true
   harness:
-    name: hl304-harness
+    name: ${COMPOSE_PROJECT_NAME:-hl304}-harness
     internal: true

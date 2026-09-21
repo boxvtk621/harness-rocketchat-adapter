@@ -1,3 +1,4 @@
+param([string]$EnvironmentFile)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $gateway = Join-Path $root 'src\Gateway'
@@ -19,7 +20,9 @@ foreach ($required in @(
     }
 }
 
-$composeJson = docker compose -f (Join-Path $root 'compose.yaml') --profile harness config --format json
+$composeArgs = @('compose')
+if ($EnvironmentFile) { $composeArgs += @('--env-file', $EnvironmentFile) }
+$composeJson = docker @composeArgs -f (Join-Path $root 'compose.yaml') --profile harness config --format json
 if ($LASTEXITCODE -ne 0) { throw 'Unable to render Compose configuration.' }
 $compose = $composeJson | ConvertFrom-Json
 

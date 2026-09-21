@@ -3,101 +3,185 @@
     <div class="login-panel">
       <p class="eyebrow">HARNESS CONTROL</p>
       <h1 id="login-title">Вход в Web управления</h1>
-      <p>Доступ защищён локальным Keycloak. Пароль не хранится в приложении.</p>
-      <p class="error" *ngIf="error()" role="alert">{{ error() }}</p>
+      <p>Доступ защищён Keycloak. Пароль не передаётся приложению.</p>
+      <p class="error" *ngIf="authError()" role="alert">{{ authError() }}</p>
       <button class="primary" type="button" (click)="login()">Войти</button>
     </div>
   </section>
 
   <ng-template #application>
     <div class="shell">
-      <aside>
-        <div class="brand"><span class="brand-mark">H</span><strong>Harness</strong></div>
+      <aside class="sidebar">
+        <div class="brand"><span class="brand-mark" aria-hidden="true">H</span><strong>Harness</strong></div>
         <nav aria-label="Основные разделы">
-          <button [class.active]="section()==='work'" (click)="open('work')">Работа</button>
-          <button [class.active]="section()==='history'" (click)="open('history')">История</button>
-          <button [class.active]="section()==='nodes'" (click)="open('nodes')">Ноды</button>
-          <button [class.active]="section()==='settings'" (click)="open('settings')">Настройки</button>
+          <button data-testid="nav-work" [attr.aria-current]="section()==='work' ? 'page' : null" [class.active]="section()==='work'" (click)="open('work')">Работа</button>
+          <button data-testid="nav-history" [attr.aria-current]="section()==='history' ? 'page' : null" [class.active]="section()==='history'" (click)="open('history')">История</button>
+          <button data-testid="nav-nodes" [attr.aria-current]="section()==='nodes' ? 'page' : null" [class.active]="section()==='nodes'" (click)="open('nodes')">Ноды</button>
+          <button data-testid="nav-settings" [attr.aria-current]="section()==='settings' ? 'page' : null" [class.active]="section()==='settings'" (click)="open('settings')">Настройки</button>
         </nav>
         <div class="account">
-          <span>{{ user()?.profile?.['preferred_username'] }}</span>
+          <span class="realtime" [attr.title]="realtimeState()"><i aria-hidden="true"></i>{{ realtimeState() }}</span>
+          <span class="username">{{ user()?.profile?.['preferred_username'] }}</span>
           <button class="link" type="button" (click)="logout()">Выйти</button>
         </div>
       </aside>
 
       <section class="content">
-        <header>
+        <header class="page-header">
           <div>
-            <h1>{{ section()==='work' ? 'Работа' : section()==='history' ? 'История' : section()==='nodes' ? 'Ноды' : 'Настройки' }}</h1>
-            <p *ngIf="section()==='settings'">Подключения Harness · уведомления: {{ realtimeState() }}</p>
+            <h1>{{ section()==='work' ? 'Работа агентов' : section()==='history' ? 'История обращений' : section()==='nodes' ? 'Ноды' : 'Настройки' }}</h1>
+            <p>{{ section()==='work' ? 'Текущие и ожидающие обращения' : section()==='history' ? 'Завершённые обращения и результаты' : section()==='nodes' ? 'Доступность, здоровье и свежесть' : 'Подключения и наблюдение' }}</p>
           </div>
-          <button type="button" *ngIf="section()==='settings'" (click)="loadConnections()">Обновить</button>
+          <button data-testid="refresh-current" type="button" (click)="refreshCurrent()" [disabled]="isLoading(currentResource())">Обновить</button>
         </header>
 
-        <div class="empty-state" *ngIf="section()==='work' && !work().length">
-          <strong>{{ work().length ? 'Активные обращения' : 'Активных обращений нет' }}</strong>
-          <span>{{ work().length ? (work().length + ' записей в актуальной проекции.') : 'Harness пока не сообщил о работе.' }}</span>
-        </div>
-        <div class="table-panel" *ngIf="section()==='work' && work().length">
-          <table><thead><tr><th>Request</th><th>Нода</th><th>Состояние</th><th>Попытка</th></tr></thead>
-          <tbody><tr *ngFor="let item of work()"><td class="mono">{{ item.requestId }}</td><td class="mono">{{ item.nodeId }}</td><td>{{ item.status }}</td><td>{{ item.activeAttempt?.state || '—' }}</td></tr></tbody></table>
-        </div>
-        <div class="empty-state" *ngIf="section()==='history' && !history().length">
-          <strong>{{ history().length ? 'История' : 'История пуста' }}</strong>
-          <span>{{ history().length ? (history().length + ' записей в актуальной проекции.') : 'Harness пока не сообщил о завершённых обращениях.' }}</span>
-        </div>
-        <div class="table-panel" *ngIf="section()==='history' && history().length">
-          <table><thead><tr><th>Диалог</th><th>Нода</th><th>Сообщений</th><th>Создан</th></tr></thead>
-          <tbody><tr *ngFor="let item of history()"><td>{{ item.title || item.dialogId }}</td><td class="mono">{{ item.nodeId }}</td><td>{{ item.messages.length }}</td><td>{{ item.createdAt | date:'dd.MM.yyyy HH:mm' }}</td></tr></tbody></table>
-        </div>
-        <div class="empty-state" *ngIf="section()==='nodes' && !nodes().length">
-          <strong>Ноды не зарегистрированы</strong>
-          <span>Добавьте базовый URI Harness в настройках. Неизвестное состояние не считается готовностью.</span>
-        </div>
-        <div class="table-panel" *ngIf="section()==='nodes' && nodes().length">
-          <table><thead><tr><th>Нода</th><th>Состояние</th><th>Последняя проверка</th></tr></thead>
-          <tbody><tr *ngFor="let item of nodes()"><td>{{ item.name }}<br><span class="mono">{{ item.observation.nodeId || 'не обнаружена' }}</span></td><td>{{ item.observation.httpReachable === null ? 'HTTP неизвестно' : (item.observation.httpReachable ? 'HTTP доступен' : 'HTTP недоступен') }} · {{ item.observation.executorHealthy === null ? 'health неизвестно' : (item.observation.executorHealthy ? 'healthy' : 'unhealthy') }} · {{ item.observation.ready ? 'ready' : 'not ready' }} · heartbeat {{ item.observation.heartbeatFresh === null ? 'неизвестен' : (item.observation.heartbeatFresh ? 'свежий' : 'устарел') }}</td><td>{{ item.observation.attemptedAt ? (item.observation.attemptedAt | date:'dd.MM.yyyy HH:mm:ss') : 'Нет данных' }}</td></tr></tbody></table>
-        </div>
-
-        <div class="settings-layout" *ngIf="section()==='settings'">
-          <section class="table-panel" aria-labelledby="connections-title">
-            <div class="panel-title">
-              <div><h2 id="connections-title">Подключения</h2><span>{{ connections().length }} зарегистрировано</span></div>
-              <button type="button" (click)="clearForm()">Добавить</button>
+        <section data-testid="screen-work" *ngIf="section()==='work'" class="screen">
+          <div class="toolbar" aria-label="Фильтры работы">
+            <label class="search-field"><span class="sr-only">Поиск обращений</span><input data-testid="work-search" type="search" [(ngModel)]="workQuery" placeholder="Название или нода"></label>
+            <label><span class="sr-only">Состояние обращения</span><select data-testid="work-status" [(ngModel)]="workStatus">
+              <option value="all">Все состояния</option><option value="attention">Требуют внимания</option><option value="running">Выполняются</option><option value="queued">В очереди</option><option value="done">Завершены</option>
+            </select></label>
+          </div>
+          <p class="banner error" *ngIf="errorFor('work')" role="alert">{{ errorFor('work') }}</p>
+          <p class="loading-line" *ngIf="isLoading('work')" role="status">Загрузка данных…</p>
+          <div class="workspace">
+            <div class="listing">
+              <div class="table-scroll" *ngIf="filteredWork().length">
+                <table data-testid="work-table" aria-label="Текущая работа">
+                  <thead><tr><th>Обращение</th><th>Нода</th><th>Состояние</th><th>Наблюдалось</th><th>Очередь</th></tr></thead>
+                  <tbody>
+                    <ng-container *ngFor="let group of workGroups(); trackBy: trackGroup">
+                      <tr class="group-row"><th colspan="5">{{ group.title }} <span>· {{ group.rows.length }}</span></th></tr>
+                      <tr *ngFor="let item of group.rows; trackBy: trackWork" [class.selected]="selectedWorkId()===workKey(item)" [attr.data-testid]="'work-row-' + safeTestId(workKey(item))">
+                        <td><button class="row-title" type="button" [attr.aria-pressed]="selectedWorkId()===workKey(item)" (click)="selectWork(item)">{{ workTitle(item) }}</button></td>
+                        <td>{{ workNodeName(item) }}</td>
+                        <td><span [class]="'status ' + statusClass(item.status, item.effectStatus || item.activeAttempt?.effectStatus)">{{ statusLabel(item.status, item.effectStatus || item.activeAttempt?.effectStatus) }}</span></td>
+                        <td class="num">{{ workUpdatedAt(item) ? (workUpdatedAt(item) | date:'HH:mm:ss') : 'Нет данных' }}</td>
+                        <td class="num">{{ item.queueSequence > 0 ? item.queueSequence : '—' }}</td>
+                      </tr>
+                    </ng-container>
+                  </tbody>
+                </table>
+              </div>
+              <div class="empty-state" *ngIf="!isLoading('work') && !errorFor('work') && work().length===0"><strong>Активных обращений нет</strong><span>Harness пока не сообщил о текущей работе.</span></div>
+              <div class="empty-state" *ngIf="!isLoading('work') && work().length>0 && filteredWork().length===0"><strong>По заданным условиям ничего не найдено.</strong><span>Измените строку поиска или состояние.</span></div>
+              <footer class="table-foot" *ngIf="filteredWork().length">Показано обращений: {{ filteredWork().length }}</footer>
             </div>
-            <p class="error banner" *ngIf="error()" role="alert">{{ error() }}</p>
-            <p class="notice banner" *ngIf="notice()" role="status">{{ notice() }}</p>
-            <div class="table-scroll" [attr.aria-busy]="loading()">
-              <table>
-                <thead><tr><th>Имя</th><th>Базовый URI</th><th>Наблюдение</th><th>Обновлено</th></tr></thead>
-                <tbody>
-                  <tr *ngFor="let item of connections(); trackBy: trackConnection" tabindex="0" (click)="select(item)" (keydown.enter)="select(item)" [class.selected]="selected()?.id===item.id">
-                    <td>{{ item.name }}</td><td class="mono">{{ item.baseUri }}</td><td><span class="status" [class.unknown]="item.observation.compatibility==='unknown'">{{ item.observation.compatibility }}</span></td><td>{{ item.updatedAt | date:'dd.MM.yyyy HH:mm' }}</td>
+            <aside data-testid="work-inspector" class="inspector" aria-label="Детали обращения">
+              <ng-container *ngIf="selectedWork() as item; else noWorkSelection">
+                <p class="inspector-kicker">{{ workNodeName(item) }}</p><h2>Детали обращения</h2><p class="inspector-title">{{ workTitle(item) }}</p>
+                <p><span [class]="'status ' + statusClass(item.status, item.effectStatus || item.activeAttempt?.effectStatus)">{{ statusLabel(item.status, item.effectStatus || item.activeAttempt?.effectStatus) }}</span></p>
+                <section><h3>Состояние выполнения</h3><dl>
+                  <dt>Наблюдалось</dt><dd>{{ workUpdatedAt(item) ? (workUpdatedAt(item) | date:'dd.MM.yyyy HH:mm:ss') : 'Нет данных' }}</dd>
+                  <dt>Позиция в очереди</dt><dd>{{ item.queueSequence > 0 ? item.queueSequence : 'Не в очереди' }}</dd>
+                  <dt>Попытка</dt><dd>{{ item.activeAttempt ? statusLabel(item.activeAttempt.state, item.activeAttempt.effectStatus) : 'Нет данных' }}</dd><dt>Внешний эффект</dt><dd>{{ effectLabel(item.effectStatus || item.activeAttempt?.effectStatus) }}</dd>
+                </dl></section>
+                <details><summary>Диагностика</summary><dl><dt>Request ID</dt><dd class="mono wrap">{{ item.requestId }}</dd><dt>Dialog ID</dt><dd class="mono wrap">{{ item.dialogId }}</dd><dt>Node ID</dt><dd class="mono wrap">{{ item.nodeId }}</dd><dt>Версия</dt><dd>{{ item.version }}</dd></dl></details>
+              </ng-container>
+              <ng-template #noWorkSelection><h2>Детали обращения</h2><p class="muted">Выберите строку в списке.</p></ng-template>
+            </aside>
+          </div>
+        </section>
+
+        <section data-testid="screen-history" *ngIf="section()==='history'" class="screen">
+          <div class="toolbar" aria-label="Фильтры истории">
+            <label class="search-field"><span class="sr-only">Поиск в истории</span><input data-testid="history-search" type="search" [(ngModel)]="historyQuery" placeholder="Название, результат или нода"></label>
+            <label><span class="sr-only">Результат обращения</span><select data-testid="history-status" [(ngModel)]="historyStatus"><option value="all">Все результаты</option><option value="completed">Завершено</option><option value="failed">Ошибка</option><option value="cancelled">Отменено</option><option value="interrupted">Прервано</option><option value="unknown">Исход неизвестен</option></select></label>
+            <label><span class="sr-only">Нода</span><select data-testid="history-node" [(ngModel)]="historyNode"><option value="all">Все ноды</option><option *ngFor="let node of nodes(); trackBy: trackNode" [value]="node.connectionId">{{ nodeName(node) }}</option></select></label>
+          </div>
+          <p class="banner error" *ngIf="errorFor('history')" role="alert">{{ errorFor('history') }}</p>
+          <p class="loading-line" *ngIf="isLoading('history')" role="status">Загрузка данных…</p>
+          <div class="workspace">
+            <div class="listing">
+              <div class="table-scroll" *ngIf="filteredHistory().length">
+                <table data-testid="history-table" aria-label="История обращений"><thead><tr><th>Обращение</th><th>Нода</th><th>Результат</th><th>Завершено</th></tr></thead><tbody>
+                  <tr *ngFor="let item of filteredHistory(); trackBy: trackHistory" [class.selected]="selectedHistoryId()===item.key" [attr.data-testid]="'history-row-' + safeTestId(item.key)">
+                    <td><button class="row-title" type="button" [attr.aria-pressed]="selectedHistoryId()===item.key" (click)="selectHistory(item)">{{ historyTitle(item) }}</button></td>
+                    <td>{{ historyNodeName(item) }}</td><td><span [class]="'status ' + statusClass(item.status, item.effectStatus)">{{ statusLabel(item.status, item.effectStatus) }}</span></td>
+                    <td class="num">{{ item.completedAt ? (item.completedAt | date:'dd.MM HH:mm') : 'Время не подтверждено' }}</td>
                   </tr>
-                </tbody>
-              </table>
-              <div class="table-empty" *ngIf="!loading() && connections().length===0">Подключения не зарегистрированы.</div>
-              <div class="table-empty" *ngIf="loading()">Загрузка…</div>
+                </tbody></table>
+              </div>
+              <div class="empty-state" *ngIf="!isLoading('history') && !errorFor('history') && history().length===0"><strong>История пуста</strong><span>Завершённых обращений пока нет.</span></div>
+              <div class="empty-state" *ngIf="!isLoading('history') && history().length>0 && filteredHistory().length===0"><strong>По заданным условиям ничего не найдено.</strong><span>Измените поиск или фильтры.</span></div>
+              <footer class="table-foot" *ngIf="filteredHistory().length">Показано обращений: {{ filteredHistory().length }}</footer>
             </div>
-          </section>
+            <aside data-testid="history-inspector" class="inspector" aria-label="Результат обращения">
+              <ng-container *ngIf="selectedHistory() as item; else noHistorySelection">
+                <p class="inspector-kicker">{{ historyNodeName(item) }}</p><h2>Результат обращения</h2><p class="inspector-title">{{ historyTitle(item) }}</p>
+                <p><span [class]="'status ' + statusClass(item.status, item.effectStatus)">{{ statusLabel(item.status, item.effectStatus) }}</span></p>
+                <section><h3>Обращение</h3><p class="preserve">{{ requestText(item) }}</p></section>
+                <section><h3>Результат обращения</h3><p class="preserve">{{ resultText(item) }}</p></section>
+                <section><h3>Время</h3><dl><dt>Получено</dt><dd>{{ item.createdAt ? (item.createdAt | date:'dd.MM.yyyy HH:mm:ss') : 'Нет данных' }}</dd><dt>Завершено</dt><dd>{{ item.completedAt ? (item.completedAt | date:'dd.MM.yyyy HH:mm:ss') : 'Не подтверждено' }}</dd></dl></section>
+                <details><summary>Диагностика</summary><dl><dt>Request ID</dt><dd class="mono wrap">{{ item.requestId || 'Нет данных' }}</dd><dt>Dialog ID</dt><dd class="mono wrap">{{ item.dialogId }}</dd><dt>Node ID</dt><dd class="mono wrap">{{ item.nodeId }}</dd></dl></details>
+              </ng-container>
+              <ng-template #noHistorySelection><h2>Результат обращения</h2><p class="muted">Выберите строку в списке.</p></ng-template>
+            </aside>
+          </div>
+        </section>
 
-          <aside class="inspector">
-            <div class="inspector-head"><h2>{{ form.id ? 'Подключение' : 'Новое подключение' }}</h2><span *ngIf="form.id" class="status unknown">Не проверено</span></div>
-            <form (ngSubmit)="save()">
-              <label>Имя<input name="name" [(ngModel)]="form.name" required maxlength="80" autocomplete="off"></label>
-              <label>Полный базовый URI<input name="baseUri" [(ngModel)]="form.baseUri" required type="url" placeholder="https://host.example/api/harness/" autocomplete="url"></label>
-              <label>Интервал наблюдения, сек.<input name="observationIntervalSeconds" [(ngModel)]="form.observationIntervalSeconds" required type="number" min="2" max="3600"></label>
-              <label>Таймаут запроса, сек.<input name="requestTimeoutSeconds" [(ngModel)]="form.requestTimeoutSeconds" required type="number" min="1" max="120"></label>
-              <label>Порог устаревания, сек.<input name="staleThresholdSeconds" [(ngModel)]="form.staleThresholdSeconds" required type="number" min="3" max="86400"></label>
-              <p class="hint">Path и query сохраняются. URI с userinfo и fragment отклоняются; смена URI начинает новую эпоху наблюдения.</p>
-              <dl *ngIf="form.id"><dt>Доступность API</dt><dd>{{ selected()?.observation?.httpReachable === null ? 'unknown' : (selected()?.observation?.httpReachable ? 'reachable' : 'unreachable') }}</dd><dt>Heartbeat</dt><dd>{{ selected()?.observation?.heartbeatFresh === null ? 'unknown' : (selected()?.observation?.heartbeatFresh ? 'fresh' : 'stale') }}</dd><dt>Эпоха конфигурации</dt><dd>{{ selected()?.configEpoch || 1 }}</dd></dl>
-              <button class="primary" type="submit" [disabled]="loading() || !form.name.trim() || !form.baseUri.trim()">Сохранить</button>
-            </form>
-          </aside>
-        </div>
+        <section data-testid="screen-nodes" *ngIf="section()==='nodes'" class="screen">
+          <div class="toolbar" aria-label="Фильтры нод">
+            <label class="search-field"><span class="sr-only">Поиск нод</span><input data-testid="nodes-search" type="search" [(ngModel)]="nodesQuery" placeholder="Название или адрес"></label>
+            <label><span class="sr-only">Состояние ноды</span><select data-testid="nodes-state" [(ngModel)]="nodesState"><option value="all">Все состояния</option><option value="ready">Готовы</option><option value="busy">Заняты</option><option value="not-ready">Приём закрыт</option><option value="stale">Устарели</option><option value="offline">Недоступны</option><option value="unknown">Не проверены</option><option value="conflict">Конфликт</option></select></label>
+          </div>
+          <p class="banner error" *ngIf="errorFor('nodes')" role="alert">{{ errorFor('nodes') }}</p>
+          <p class="loading-line" *ngIf="isLoading('nodes')" role="status">Загрузка данных…</p>
+          <div class="workspace">
+            <div class="listing">
+              <div class="table-scroll" *ngIf="filteredNodes().length"><table data-testid="nodes-table" aria-label="Состояние нод"><thead><tr><th>Нода</th><th>Доступность</th><th>Здоровье</th><th>Heartbeat</th><th>Выполнение</th><th>Приём новых</th><th>Последняя проверка</th></tr></thead><tbody>
+                <tr *ngFor="let item of filteredNodes(); trackBy: trackNode" [class.selected]="selectedNodeId()===item.connectionId" [attr.data-testid]="'node-row-' + safeTestId(item.connectionId)">
+                  <td><button class="row-title" type="button" [attr.aria-pressed]="selectedNodeId()===item.connectionId" (click)="selectNode(item)">{{ nodeName(item) }}</button></td>
+                  <td><span [class]="'status ' + (item.identityStatus==='node_id_conflict' ? 'attention' : observationClass(item.observation, item.connectionId))">{{ item.identityStatus==='node_id_conflict' ? 'Конфликт идентичности' : availabilityLabel(item.observation) }}</span></td><td>{{ healthLabel(item.observation, item.connectionId) }}</td><td>{{ heartbeatLabel(item.observation, item.connectionId) }}</td><td>{{ occupancyLabel(item.observation.occupancy || item.occupancy) }}</td><td>{{ item.identityStatus==='node_id_conflict' ? 'Недоступна: конфликт' : readinessLabel(item.observation, item.connectionId) }}</td>
+                  <td class="num">{{ item.observation.attemptedAt ? (item.observation.attemptedAt | date:'HH:mm:ss') : 'Нет данных' }}</td>
+                </tr>
+              </tbody></table></div>
+              <div class="empty-state" *ngIf="!isLoading('nodes') && !errorFor('nodes') && nodes().length===0"><strong>Ноды не зарегистрированы</strong><span>Добавьте подключение в настройках. Неизвестное состояние не считается готовностью.</span></div>
+              <div class="empty-state" *ngIf="!isLoading('nodes') && nodes().length>0 && filteredNodes().length===0"><strong>По заданным условиям ничего не найдено.</strong><span>Измените поиск или состояние.</span></div>
+              <footer class="table-foot" *ngIf="filteredNodes().length">Показано нод: {{ filteredNodes().length }}</footer>
+            </div>
+            <aside data-testid="node-inspector" class="inspector" aria-label="Наблюдение за нодой">
+              <ng-container *ngIf="selectedNode() as item; else noNodeSelection">
+                <p class="inspector-kicker">{{ nodeName(item) }}</p><h2>Наблюдение за нодой</h2><p><span [class]="'status ' + (item.identityStatus==='node_id_conflict' ? 'attention' : observationClass(item.observation, item.connectionId))">{{ item.identityStatus==='node_id_conflict' ? 'Конфликт идентичности' : observationLabel(item.observation, item.connectionId) }}</span></p>
+                <p class="uri">{{ item.baseUri || connectionFor(item.connectionId)?.baseUri || 'Адрес не предоставлен' }}</p>
+                <p class="banner error compact" *ngIf="item.identityStatus==='node_id_conflict'" role="alert">Одинаковый Node ID объявлен несколькими адресами. Нода исключена из работы до устранения конфликта.</p>
+                <section><h3>Состояние наблюдения</h3><dl><dt>Доступность API</dt><dd>{{ availabilityLabel(item.observation) }}</dd><dt>Здоровье</dt><dd>{{ healthLabel(item.observation, item.connectionId) }}</dd><dt>Heartbeat</dt><dd>{{ heartbeatLabel(item.observation, item.connectionId) }}</dd><dt>Последний heartbeat</dt><dd>{{ item.observation.heartbeatAt ? (item.observation.heartbeatAt | date:'dd.MM.yyyy HH:mm:ss') : 'Нет данных' }}</dd><dt>Выполнение</dt><dd>{{ occupancyLabel(item.observation.occupancy || item.occupancy) }}</dd><dt>Приём новых</dt><dd>{{ item.identityStatus==='node_id_conflict' ? 'Недоступна: конфликт' : readinessLabel(item.observation, item.connectionId) }}</dd><dt>Ёмкость очереди</dt><dd>{{ item.observation.capacity ?? 'Нет данных' }}</dd></dl></section>
+                <section *ngIf="heartbeatLabel(item.observation, item.connectionId)==='Heartbeat устарел'"><h3>Состояние не подтверждено</h3><p>Устаревший heartbeat не доказывает остановку принятого запроса. Автоматический повтор не выполняется.</p></section>
+                <details><summary>Диагностика</summary><dl><dt>Node ID</dt><dd class="mono wrap">{{ item.observation.nodeId || 'Не обнаружен' }}</dd><dt>Connection ID</dt><dd class="mono wrap">{{ item.connectionId }}</dd><dt>Boot ID</dt><dd class="mono wrap">{{ item.observation.bootId || 'Нет данных' }}</dd><dt>Ошибка</dt><dd class="mono wrap">{{ item.observation.errorCode || 'Нет' }}</dd><dt *ngIf="item.conflictingConnectionIds?.length">Конфликтующие подключения</dt><dd *ngIf="item.conflictingConnectionIds?.length" class="mono wrap">{{ item.conflictingConnectionIds.join(', ') }}</dd></dl></details>
+              </ng-container>
+              <ng-template #noNodeSelection><h2>Наблюдение за нодой</h2><p class="muted">Выберите строку в списке.</p></ng-template>
+            </aside>
+          </div>
+        </section>
+
+        <section data-testid="screen-settings" *ngIf="section()==='settings'" class="screen settings-screen">
+          <p class="banner error" *ngIf="errorFor('connections')" role="alert">{{ errorFor('connections') }}</p>
+          <p class="banner notice" *ngIf="notice()" role="status">{{ notice() }}</p>
+          <p class="loading-line" *ngIf="isLoading('connections')" role="status">Загрузка данных…</p>
+          <div class="workspace settings-layout">
+            <section class="listing" aria-labelledby="connections-title">
+              <div class="panel-title"><div><h2 id="connections-title">Подключения Harness</h2><span>{{ connections().length }} зарегистрировано</span></div><button data-testid="add-connection" type="button" (click)="clearForm()">Добавить</button></div>
+              <div class="table-scroll" *ngIf="connections().length"><table data-testid="connections-table" aria-label="Подключения Harness"><thead><tr><th>Название</th><th>Базовый URI</th><th>Наблюдение</th><th>Обновлено</th></tr></thead><tbody>
+                <tr *ngFor="let item of connections(); trackBy: trackConnection" [class.selected]="selectedConnectionId()===item.id" [attr.data-testid]="'connection-row-' + safeTestId(item.id)"><td><button class="row-title" type="button" [attr.aria-pressed]="selectedConnectionId()===item.id" (click)="selectConnection(item)">{{ item.name }}</button></td><td class="uri">{{ item.baseUri }}</td><td><span [class]="'status ' + (item.identityStatus==='node_id_conflict' ? 'attention' : observationClass(item.observation, item.id))">{{ item.identityStatus==='node_id_conflict' ? 'Конфликт идентичности' : observationLabel(item.observation, item.id) }}</span></td><td class="num">{{ item.updatedAt | date:'dd.MM HH:mm' }}</td></tr>
+              </tbody></table></div>
+              <div class="empty-state" *ngIf="!isLoading('connections') && !errorFor('connections') && connections().length===0"><strong>Подключений нет</strong><span>Добавьте полный базовый URI ноды Harness.</span></div>
+            </section>
+            <aside data-testid="connection-inspector" class="inspector" aria-label="Редактор подключения">
+              <div class="inspector-head"><h2>{{ form.id ? 'Подключение' : 'Новое подключение' }}</h2><span *ngIf="selectedConnection() as item" [class]="'status ' + (item.identityStatus==='node_id_conflict' ? 'attention' : observationClass(item.observation, item.id))">{{ item.identityStatus==='node_id_conflict' ? 'Конфликт идентичности' : observationLabel(item.observation, item.id) }}</span></div>
+              <form (ngSubmit)="save()">
+                <label>Название<input data-testid="connection-name" name="name" [(ngModel)]="form.name" required maxlength="80" autocomplete="off"></label>
+                <label>Полный базовый URI<input data-testid="connection-uri" name="baseUri" [(ngModel)]="form.baseUri" required type="url" placeholder="https://host.example/api/harness/" autocomplete="url"></label>
+                <div class="form-grid"><label>Интервал, сек.<input name="observationIntervalSeconds" [(ngModel)]="form.observationIntervalSeconds" required type="number" min="2" max="3600"></label><label>Таймаут, сек.<input name="requestTimeoutSeconds" [(ngModel)]="form.requestTimeoutSeconds" required type="number" min="1" max="120"></label><label>Устаревание, сек.<input name="staleThresholdSeconds" [(ngModel)]="form.staleThresholdSeconds" required type="number" min="3" max="86400"></label></div>
+                <p class="hint">Path и query сохраняются. URI с userinfo и fragment отклоняются. Смена URI начинает новую эпоху наблюдения.</p>
+                <section *ngIf="selectedConnection() as item"><h3>Последнее наблюдение</h3><dl><dt>Доступность</dt><dd>{{ availabilityLabel(item.observation) }}</dd><dt>Heartbeat</dt><dd>{{ heartbeatLabel(item.observation, item.id) }}</dd><dt>Идентичность</dt><dd>{{ item.identityStatus==='node_id_conflict' ? 'Конфликт Node ID' : item.identityStatus==='unique' ? 'Уникальна' : 'Не подтверждена' }}</dd><dt>Эпоха</dt><dd>{{ item.configEpoch }}</dd></dl></section>
+                <div class="actions"><button data-testid="save-connection" class="primary" type="submit" [disabled]="saveBusy() || !form.name.trim() || !form.baseUri.trim()">{{ saveBusy() ? 'Сохранение…' : 'Сохранить' }}</button><button *ngIf="form.id" type="button" (click)="clearForm()">Отменить</button></div>
+              </form>
+            </aside>
+          </div>
+        </section>
       </section>
     </div>
   </ng-template>
 </main>
 
-<ng-template #loadingAuth><div class="boot">Проверка сессии…</div></ng-template>
+<ng-template #loadingAuth><div class="boot" role="status">Проверка сессии…</div></ng-template>
