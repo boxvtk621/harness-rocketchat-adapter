@@ -10,11 +10,26 @@ interface Connection {
   id: string;
   name: string;
   baseUri: string;
-  observationStatus: string;
-  lastObservationAt: string | null;
+  configEpoch: number;
+  observationIntervalSeconds: number;
+  requestTimeoutSeconds: number;
+  staleThresholdSeconds: number;
+  observation: Observation;
   createdAt: string;
   updatedAt: string;
 }
+interface Observation {
+  attemptedAt: string | null; successfulAt: string | null; httpReachable: boolean | null;
+  executorHealthy: boolean | null; ready: boolean | null; capacity: string | null;
+  heartbeatAt: string | null; heartbeatFresh: boolean | null; bootId: string | null;
+  nodeId: string | null; protocolVersion: number | null; schemaId: string | null;
+  compatibility: string; errorCode: string | null;
+}
+interface NodeProjection { connectionId: string; name: string; configEpoch: number; observation: Observation; }
+interface AttemptProjection { attemptId: string; requestId: string; state: string; effectStatus: string; }
+interface WorkProjection { connectionId: string; nodeId: string; requestId: string; dialogId: string; status: string; version: number; queueSequence: number; activeAttempt: AttemptProjection | null; }
+interface MessageProjection { messageId: string; role: string; sequence: number; createdAt: string; text: string | null; content: unknown; }
+interface HistoryProjection { connectionId: string; nodeId: string; dialogId: string; title: string | null; dialogVersion: number; createdAt: string; messages: MessageProjection[]; }
 
 type Section = 'work' | 'history' | 'nodes' | 'settings';
 
@@ -33,9 +48,12 @@ export class AppComponent implements OnInit, OnDestroy {
   readonly notice = signal('');
   readonly connections = signal<Connection[]>([]);
   readonly selected = signal<Connection | null>(null);
+  readonly nodes = signal<NodeProjection[]>([]);
+  readonly work = signal<WorkProjection[]>([]);
+  readonly history = signal<HistoryProjection[]>([]);
   readonly realtimeState = signal('Не подключено');
 
-  form = { id: '', name: '', baseUri: '' };
+  form = { id: '', name: '', baseUri: '', observationIntervalSeconds: 15, requestTimeoutSeconds: 5, staleThresholdSeconds: 45 };
   private centrifuge?: Centrifuge;
   private subscription?: Subscription;
   private readonly users = new UserManager({
@@ -79,16 +97,21 @@ export class AppComponent implements OnInit, OnDestroy {
     this.section.set(section);
     this.error.set('');
     if (section === 'settings') this.loadConnections();
+    if (section === 'nodes') this.loadProjection('nodes');
+    if (section === 'work') this.loadProjection('work');
+    if (section === 'history') this.loadProjection('history');
   }
 
   select(connection: Connection): void {
     this.selected.set(connection);
-    this.form = { id: connection.id, name: connection.name, baseUri: connection.baseUri };
+    this.form = { id: connection.id, name: connection.name, baseUri: connection.baseUri,
+      observationIntervalSeconds: connection.observationIntervalSeconds, requestTimeoutSeconds: connection.requestTimeoutSeconds,
+      staleThresholdSeconds: connection.staleThresholdSeconds };
   }
 
   clearForm(): void {
     this.selected.set(null);
-    this.form = { id: '', name: '', baseUri: '' };
+    this.form = { id: '', name: '', baseUri: '', observationIntervalSeconds: 15, requestTimeoutSeconds: 5, staleThresholdSeconds: 45 };
   }
 
   loadConnections(): void {
@@ -113,7 +136,9 @@ export class AppComponent implements OnInit, OnDestroy {
     this.loading.set(true);
     this.error.set('');
     this.notice.set('');
-    const body = { name: this.form.name.trim(), baseUri: this.form.baseUri.trim() };
+    const body = { name: this.form.name.trim(), baseUri: this.form.baseUri.trim(),
+      observationIntervalSeconds: this.form.observationIntervalSeconds, requestTimeoutSeconds: this.form.requestTimeoutSeconds,
+      staleThresholdSeconds: this.form.staleThresholdSeconds };
     const request = this.form.id
       ? this.http.put<Connection>(`/api/connections/${encodeURIComponent(this.form.id)}`, body, { headers })
       : this.http.post<Connection>('/api/connections', body, { headers });
@@ -129,6 +154,20 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   trackConnection(_: number, item: Connection): string { return item.id; }
+
+  private loadProjection(kind: 'nodes' | 'work' | 'history'): void {
+    const headers = this.headers();
+    if (!headers) return;
+    this.loading.set(true);
+    this.http.get<NodeProjection[] | WorkProjection[] | HistoryProjection[]>(`/api/projections/${kind}`, { headers }).subscribe({
+      next: value => {
+        if (kind === 'nodes') this.nodes.set(value as NodeProjection[]);
+        else if (kind === 'work') this.work.set(value as WorkProjection[]);
+        else this.history.set(value as HistoryProjection[]);
+        this.loading.set(false);
+      }, error: error => this.handleHttpError(error)
+    });
+  }
 
   private headers(): HttpHeaders | null {
     const token = this.user()?.access_token;
@@ -169,11 +208,17 @@ export class AppComponent implements OnInit, OnDestroy {
       this.centrifuge.on('connected', () => {
         this.realtimeState.set('Подключено');
         if (this.section() === 'settings') this.loadConnections();
+        if (this.section() === 'nodes') this.loadProjection('nodes');
+        if (this.section() === 'work') this.loadProjection('work');
+        if (this.section() === 'history') this.loadProjection('history');
       });
       this.centrifuge.on('disconnected', () => this.realtimeState.set('Переподключение…'));
       this.subscription = this.centrifuge.newSubscription('connections');
       this.subscription.on('publication', () => {
         if (this.section() === 'settings') this.loadConnections();
+        if (this.section() === 'nodes') this.loadProjection('nodes');
+        if (this.section() === 'work') this.loadProjection('work');
+        if (this.section() === 'history') this.loadProjection('history');
       });
       this.subscription.subscribe();
       this.centrifuge.connect();

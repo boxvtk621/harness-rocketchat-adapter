@@ -37,7 +37,7 @@ builder.Services.AddHttpClient("adapter", client =>
 {
     client.BaseAddress = new Uri(adapterBaseUrl);
     client.DefaultRequestHeaders.Add("X-Internal-Token", adapterToken);
-});
+}).ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false, UseCookies = false });
 builder.Services.AddHealthChecks().AddCheck<AdapterHealthCheck>("adapter", tags: ["ready"]);
 
 var app = builder.Build();
@@ -74,13 +74,17 @@ app.MapMethods("/api/connections/{**path}", ["GET", "POST", "PUT", "DELETE"], Pr
     .RequireAuthorization();
 app.MapMethods("/api/connections", ["GET", "POST"], ProxyToAdapter)
     .RequireAuthorization();
+app.MapGet("/api/projections/nodes", (HttpContext context, IHttpClientFactory factory) => ProxyToAdapter(context, factory, "projections/nodes")).RequireAuthorization();
+app.MapGet("/api/projections/work", (HttpContext context, IHttpClientFactory factory) => ProxyToAdapter(context, factory, "projections/work")).RequireAuthorization();
+app.MapGet("/api/projections/history", (HttpContext context, IHttpClientFactory factory) => ProxyToAdapter(context, factory, "projections/history")).RequireAuthorization();
 
 app.Run();
 
 async Task ProxyToAdapter(HttpContext context, IHttpClientFactory factory, string? path = null)
 {
-    using var request = new HttpRequestMessage(new HttpMethod(context.Request.Method),
-        string.IsNullOrEmpty(path) ? "api/connections" : $"api/connections/{path}");
+    var target = string.IsNullOrEmpty(path) ? "api/connections" :
+        path.StartsWith("projections/", StringComparison.Ordinal) ? $"api/{path}" : $"api/connections/{path}";
+    using var request = new HttpRequestMessage(new HttpMethod(context.Request.Method), target + context.Request.QueryString);
 
     if (context.Request.ContentLength is > 0)
     {

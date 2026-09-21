@@ -17,11 +17,11 @@
       "standardFlowEnabled": true,
       "directAccessGrantsEnabled": false,
       "implicitFlowEnabled": false,
-      "redirectUris": ["http://localhost:18000/auth/callback"],
-      "webOrigins": ["http://localhost:18000"],
+      "redirectUris": ["http://localhost:18100/auth/callback"],
+      "webOrigins": ["http://localhost:18100"],
       "attributes": {
         "pkce.code.challenge.method": "S256",
-        "post.logout.redirect.uris": "http://localhost:18000"
+        "post.logout.redirect.uris": "http://localhost:18100"
       },
       "protocolMappers": [
         {

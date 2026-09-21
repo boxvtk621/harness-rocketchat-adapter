@@ -1,4 +1,4 @@
-name: hl303
+name: hl304
 
 services:
   client:
@@ -6,7 +6,7 @@ services:
       context: ./src/Client
     restart: unless-stopped
     ports:
-      - "127.0.0.1:18000:8080"
+      - "127.0.0.1:18100:8080"
     depends_on:
       - gateway
       - centrifugo
@@ -24,7 +24,7 @@ services:
       ADAPTER_BASE_URL: http://adapter:8080/
       ADAPTER_INTERNAL_TOKEN_FILE: /run/secrets/adapter_internal_token
       OIDC_METADATA_ADDRESS: http://keycloak:8080/realms/harness/.well-known/openid-configuration
-      OIDC_ISSUER: http://localhost:18080/realms/harness
+      OIDC_ISSUER: http://localhost:18180/realms/harness
       OIDC_AUDIENCE: harness-web
       CENTRIFUGO_CLIENT_TOKEN_SECRET_FILE: /run/secrets/centrifugo_client_secret
     secrets: [adapter_internal_token, centrifugo_client_secret]
@@ -45,9 +45,14 @@ services:
       ADAPTER_INTERNAL_TOKEN_FILE: /run/secrets/adapter_internal_token
       Centrifugo__PublishUrl: http://centrifugo:8000/api/publish
       CENTRIFUGO_API_KEY_FILE: /run/secrets/centrifugo_api_key
+      Harness__AllowedHosts: cursor-harness,codex-harness
+      Harness__CaFile: /etc/ssl/certs/hl304-harness.crt
     secrets: [mongodb_connection_string, adapter_internal_token, centrifugo_api_key]
+    configs:
+      - source: harness_server_cert
+        target: /etc/ssl/certs/hl304-harness.crt
     depends_on: [mongodb, centrifugo]
-    networks: [internal]
+    networks: [internal, harness]
     deploy:
       resources:
         limits: { memory: 256M, cpus: "0.75" }
@@ -84,7 +89,7 @@ services:
       - source: keycloak_realm
         target: /opt/keycloak/data/import/harness-realm.json
     ports:
-      - "127.0.0.1:18080:8080"
+      - "127.0.0.1:18180:8080"
     command: ["start-dev", "--import-realm"]
     volumes:
       - keycloak-data:/opt/keycloak/data
@@ -107,16 +112,87 @@ services:
       resources:
         limits: { memory: 128M, cpus: "0.50" }
 
+  cursor-harness:
+    profiles: ["harness"]
+    build:
+      context: ../../harness-cursor
+      dockerfile: delivery/Dockerfile.cursor
+    restart: unless-stopped
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - >-
+        install -d -o 10001 -g 10001 -m 0700 /state/private /state/harness /state/cursor /state/cursor/home;
+        install -o 10001 -g 10001 -m 0600 /run/secrets/harness_server_key /state/private/server.key;
+        install -o 10001 -g 10001 -m 0644 /run/config/harness_server_cert /state/private/server.crt;
+        install -o 10001 -g 10001 -m 0600 /run/secrets/cursor_fixture_key /state/private/cursor.key;
+        exec setpriv --reuid=10001 --regid=10001 --clear-groups /harness-node --config /config/node.json
+    networks: [harness]
+    configs:
+      - source: cursor_node_config
+        target: /config/node.json
+      - source: harness_policy
+        target: /config/policy.txt
+      - source: harness_tools_deny
+        target: /config/tools-deny.json
+      - source: harness_server_cert
+        target: /run/config/harness_server_cert
+    secrets: [harness_server_key, cursor_fixture_key]
+    volumes:
+      - cursor-harness-data:/state
+    # The runtime config is intentionally supplied only by deployment and is
+    # mounted read-only there. No host port is published.
+    deploy:
+      resources:
+        limits: { memory: 512M, cpus: "1.00" }
+
+  codex-harness:
+    profiles: ["harness"]
+    build:
+      context: ../../harness-codex
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - >-
+        install -d -o 10001 -g 10001 -m 0700 /state/private /state/harness /state/codex /state/codex/home /state/codex/home/.codex /workspace;
+        install -o 10001 -g 10001 -m 0600 /run/secrets/harness_server_key /state/private/server.key;
+        install -o 10001 -g 10001 -m 0644 /run/config/harness_server_cert /state/private/server.crt;
+        exec setpriv --reuid=10001 --regid=10001 --clear-groups /harness-node --config /config/node.json
+    networks: [harness]
+    configs:
+      - source: codex_node_config
+        target: /config/node.json
+      - source: harness_policy
+        target: /config/policy.txt
+      - source: harness_tools_deny
+        target: /config/tools-deny.json
+      - source: harness_server_cert
+        target: /run/config/harness_server_cert
+    secrets: [harness_server_key]
+    volumes:
+      - codex-harness-data:/state
+    # The runtime config is intentionally supplied only by deployment and is
+    # mounted read-only there. No host port is published.
+    deploy:
+      resources:
+        limits: { memory: 512M, cpus: "1.00" }
+
   acceptance:
     profiles: ["acceptance"]
     build:
       context: ./tests/e2e
     environment:
-      BASE_URL: http://localhost:18000
+      BASE_URL: http://localhost:18100
       DEV_USER_USERNAME: operator
       DEV_USER_PASSWORD_FILE: /run/secrets/keycloak_dev_user_password
+      HARNESS_CA_FILE: /run/config/harness_server_cert
       OUTPUT_DIR: /output
     secrets: [keycloak_dev_user_password]
+    configs:
+      - source: harness_server_cert
+        target: /run/config/harness_server_cert
     volumes:
       - ./output/acceptance:/output
     extra_hosts:
@@ -124,7 +200,7 @@ services:
     depends_on:
       - client
       - keycloak
-    networks: [web]
+    networks: [web, harness]
     deploy:
       resources:
         limits: { memory: 768M, cpus: "1.00" }
@@ -136,6 +212,16 @@ configs:
     file: ./infra/keycloak/harness-realm.json
   centrifugo_start:
     file: ./infra/centrifugo/start.sh
+  cursor_node_config:
+    file: ./infra/harness/cursor-node.json
+  codex_node_config:
+    file: ./infra/harness/codex-node.json
+  harness_policy:
+    file: ./infra/harness/policy.txt
+  harness_tools_deny:
+    file: ./infra/harness/tools-deny.json
+  harness_server_cert:
+    file: ./.runtime/harness/server.crt
 
 secrets:
   adapter_internal_token: { file: ./.runtime/secrets/adapter_internal_token }
@@ -146,16 +232,25 @@ secrets:
   mongodb_root_username: { file: ./.runtime/secrets/mongodb_root_username }
   mongodb_root_password: { file: ./.runtime/secrets/mongodb_root_password }
   mongodb_connection_string: { file: ./.runtime/secrets/mongodb_connection_string }
+  harness_server_key: { file: ./.runtime/harness/server.key }
+  cursor_fixture_key: { file: ./.runtime/secrets/cursor_fixture_key }
 
 volumes:
   mongodb-data:
-    name: hl303-mongodb-data
+    name: ${HL304_VOLUME_PREFIX:-hl304}-mongodb-data
   keycloak-data:
-    name: hl303-keycloak-data-v2
+    name: ${HL304_VOLUME_PREFIX:-hl304}-keycloak-data
+  cursor-harness-data:
+    name: ${HL304_VOLUME_PREFIX:-hl304}-cursor-harness-data
+  codex-harness-data:
+    name: ${HL304_VOLUME_PREFIX:-hl304}-codex-harness-data
 
 networks:
   web:
-    name: hl303-web
+    name: hl304-web
   internal:
-    name: hl303-internal
+    name: hl304-internal
+    internal: true
+  harness:
+    name: hl304-harness
     internal: true

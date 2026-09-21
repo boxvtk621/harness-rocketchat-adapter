@@ -1,8 +1,8 @@
-# HL-303 Adapter
+# HL-304 Adapter
 
-ASP.NET Core registry service for Harness connection definitions. It deliberately does **not** contact Harness; each response reports `observationStatus: "not_checked"`.
+ASP.NET Core registry and observation service for provider-independent Harness nodes. Adapter is the only component allowed to contact Harness; Angular and Gateway consume typed Nodes, Work and History projections from Adapter.
 
-The repository is the HL-303 monorepo: Adapter lives at the root, while Angular Client, .NET Gateway, Docker Compose, Keycloak and Centrifugo wiring live under [`web/`](web/README.md).
+Adapter lives at the root, while Angular Client, .NET Gateway, Docker Compose, Keycloak and Centrifugo wiring live under [`web/`](web/README.md).
 
 ## Runtime configuration
 
@@ -11,23 +11,27 @@ Only deployment wiring is read from environment variables:
 - `Mongo__ConnectionString`, `Mongo__Database`
 - `InternalAuth__Token` — required secret used by Gateway calls as `X-Internal-Token`
 - `Centrifugo__PublishUrl`, `Centrifugo__ApiKey` — optional notification endpoint and secret
+- `Harness__AllowedHosts` — exact comma-separated destination allowlist
+- `Harness__CaFile` — optional private CA used only for Harness TLS
 
 Health endpoints are unauthenticated: `GET /health/live` and `GET /health/ready` (the latter pings MongoDB). All `/api/connections` calls require `X-Internal-Token`.
 
 ## API
 
-- `GET /api/connections/` — list registry entries
+- `GET /api/connections/` — list registry entries and current observations
 - `GET /api/connections/{id}` — fetch an entry
-- `POST /api/connections/` — body `{"name":"prod","baseUri":"https://harness.example/api/v1"}`
-- `PUT /api/connections/{id}` — same body; preserves `createdAt`
+- `POST /api/connections/` — register a base URI and independent observation interval, request timeout and stale threshold
+- `PUT /api/connections/{id}` — update the same settings; increments `configEpoch`
+- `GET /api/projections/nodes` — reachability, health, readiness/capacity, heartbeat freshness, boot identity and compatibility
+- `GET /api/projections/work` — provider-neutral active work items
+- `GET /api/projections/history` — provider-neutral completed work items
 
-The stored document is `{id,name,baseUri,createdAt,updatedAt}`. `baseUri` must be an absolute `http`/`https` URI; its full path (and query, if supplied) is retained. Successful creates/updates make one best-effort HTTP POST to `Centrifugo__PublishUrl` with exactly `{"connectionId":"…","kind":"created|updated"}`. A publish failure is logged and never reverses the MongoDB write.
+Base paths and queries are retained when Harness endpoint paths are joined. Redirects, URI userinfo/fragments, non-HTTPS schemes, private-network destinations outside the exact allowlist, cookies and credential forwarding are refused. A compare-and-set `configEpoch` prevents a late response for an old URI from overwriting a newer observation. SSE keepalive is never treated as executor heartbeat.
 
 ## Build and test
 
 ```powershell
-docker build -t hl-303-adapter .
-docker run --rm -p 8080:8080 -e Mongo__ConnectionString='mongodb://host.docker.internal:27017' -e Mongo__Database=hl303 -e InternalAuth__Token='<secret>' hl-303-adapter
+docker build -t hl-304-adapter .
 docker run --rm -v ${PWD}:/src -w /src mcr.microsoft.com/dotnet/sdk:10.0 dotnet restore Adapter.sln --use-lock-file
 docker run --rm -v ${PWD}:/src -w /src mcr.microsoft.com/dotnet/sdk:10.0 dotnet test Adapter.sln --no-restore
 ```

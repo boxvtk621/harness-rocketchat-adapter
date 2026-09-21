@@ -5,7 +5,7 @@ export interface RuntimeConfig {
 }
 
 export const runtimeConfig: RuntimeConfig = {
-  oidcAuthority: 'http://localhost:18080/realms/harness',
+  oidcAuthority: 'http://localhost:18180/realms/harness',
   oidcClientId: 'harness-web',
   centrifugoWebsocketUrl: `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/realtime/connection/websocket`
 };

@@ -1,0 +1,24 @@
+{
+  "listen": "0.0.0.0:8443",
+  "nodeId": "22222222-2222-4222-8222-222222222222",
+  "ownerId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "dataDir": "/state/harness",
+  "registryVersion": 1,
+  "certificateFile": "/state/private/server.crt",
+  "keyFile": "/state/private/server.key",
+  "policyFile": "/config/policy.txt",
+  "toolManifestFile": "/config/tools-deny.json",
+  "policyRevision": "hl304-fixture@1",
+  "approvalMode": "deny",
+  "manualDispatchForTesting": true,
+  "adapter": "codex",
+  "codex": {
+    "executable": "/opt/codex/node_modules/.bin/codex",
+    "stateDir": "/state/codex",
+    "workingDir": "/workspace",
+    "codexHome": "/state/codex/home/.codex",
+    "homeDir": "/state/codex/home",
+    "model": "fixture-no-provider-call",
+    "effort": "low"
+  }
+}

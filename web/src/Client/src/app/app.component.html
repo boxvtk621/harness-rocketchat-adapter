@@ -34,17 +34,29 @@
           <button type="button" *ngIf="section()==='settings'" (click)="loadConnections()">Обновить</button>
         </header>
 
-        <div class="empty-state" *ngIf="section()==='work'">
-          <strong>Активных обращений нет</strong>
-          <span>Выполнение запросов к агентам появится на следующем этапе. Сейчас никаких фиктивных операций не запускается.</span>
+        <div class="empty-state" *ngIf="section()==='work' && !work().length">
+          <strong>{{ work().length ? 'Активные обращения' : 'Активных обращений нет' }}</strong>
+          <span>{{ work().length ? (work().length + ' записей в актуальной проекции.') : 'Harness пока не сообщил о работе.' }}</span>
         </div>
-        <div class="empty-state" *ngIf="section()==='history'">
-          <strong>История пуста</strong>
-          <span>Завершённые обращения появятся после подключения Rocket.Chat и Harness.</span>
+        <div class="table-panel" *ngIf="section()==='work' && work().length">
+          <table><thead><tr><th>Request</th><th>Нода</th><th>Состояние</th><th>Попытка</th></tr></thead>
+          <tbody><tr *ngFor="let item of work()"><td class="mono">{{ item.requestId }}</td><td class="mono">{{ item.nodeId }}</td><td>{{ item.status }}</td><td>{{ item.activeAttempt?.state || '—' }}</td></tr></tbody></table>
         </div>
-        <div class="empty-state" *ngIf="section()==='nodes'">
-          <strong>Наблюдения ещё не выполнялись</strong>
-          <span>API: Не проверено · heartbeat: Нет данных · исполнитель: Нет данных · готовность: Не проверено.</span>
+        <div class="empty-state" *ngIf="section()==='history' && !history().length">
+          <strong>{{ history().length ? 'История' : 'История пуста' }}</strong>
+          <span>{{ history().length ? (history().length + ' записей в актуальной проекции.') : 'Harness пока не сообщил о завершённых обращениях.' }}</span>
+        </div>
+        <div class="table-panel" *ngIf="section()==='history' && history().length">
+          <table><thead><tr><th>Диалог</th><th>Нода</th><th>Сообщений</th><th>Создан</th></tr></thead>
+          <tbody><tr *ngFor="let item of history()"><td>{{ item.title || item.dialogId }}</td><td class="mono">{{ item.nodeId }}</td><td>{{ item.messages.length }}</td><td>{{ item.createdAt | date:'dd.MM.yyyy HH:mm' }}</td></tr></tbody></table>
+        </div>
+        <div class="empty-state" *ngIf="section()==='nodes' && !nodes().length">
+          <strong>Ноды не зарегистрированы</strong>
+          <span>Добавьте базовый URI Harness в настройках. Неизвестное состояние не считается готовностью.</span>
+        </div>
+        <div class="table-panel" *ngIf="section()==='nodes' && nodes().length">
+          <table><thead><tr><th>Нода</th><th>Состояние</th><th>Последняя проверка</th></tr></thead>
+          <tbody><tr *ngFor="let item of nodes()"><td>{{ item.name }}<br><span class="mono">{{ item.observation.nodeId || 'не обнаружена' }}</span></td><td>{{ item.observation.httpReachable === null ? 'HTTP неизвестно' : (item.observation.httpReachable ? 'HTTP доступен' : 'HTTP недоступен') }} · {{ item.observation.executorHealthy === null ? 'health неизвестно' : (item.observation.executorHealthy ? 'healthy' : 'unhealthy') }} · {{ item.observation.ready ? 'ready' : 'not ready' }} · heartbeat {{ item.observation.heartbeatFresh === null ? 'неизвестен' : (item.observation.heartbeatFresh ? 'свежий' : 'устарел') }}</td><td>{{ item.observation.attemptedAt ? (item.observation.attemptedAt | date:'dd.MM.yyyy HH:mm:ss') : 'Нет данных' }}</td></tr></tbody></table>
         </div>
 
         <div class="settings-layout" *ngIf="section()==='settings'">
@@ -60,7 +72,7 @@
                 <thead><tr><th>Имя</th><th>Базовый URI</th><th>Наблюдение</th><th>Обновлено</th></tr></thead>
                 <tbody>
                   <tr *ngFor="let item of connections(); trackBy: trackConnection" tabindex="0" (click)="select(item)" (keydown.enter)="select(item)" [class.selected]="selected()?.id===item.id">
-                    <td>{{ item.name }}</td><td class="mono">{{ item.baseUri }}</td><td><span class="status unknown">Не проверено</span></td><td>{{ item.updatedAt | date:'dd.MM.yyyy HH:mm' }}</td>
+                    <td>{{ item.name }}</td><td class="mono">{{ item.baseUri }}</td><td><span class="status" [class.unknown]="item.observation.compatibility==='unknown'">{{ item.observation.compatibility }}</span></td><td>{{ item.updatedAt | date:'dd.MM.yyyy HH:mm' }}</td>
                   </tr>
                 </tbody>
               </table>
@@ -74,8 +86,11 @@
             <form (ngSubmit)="save()">
               <label>Имя<input name="name" [(ngModel)]="form.name" required maxlength="80" autocomplete="off"></label>
               <label>Полный базовый URI<input name="baseUri" [(ngModel)]="form.baseUri" required type="url" placeholder="https://host.example/api/harness/" autocomplete="url"></label>
-              <p class="hint">Path сохраняется полностью. Сетевой запрос к адресу на этом этапе не выполняется.</p>
-              <dl *ngIf="form.id"><dt>Доступность API</dt><dd>Не проверено</dd><dt>Heartbeat</dt><dd>Нет данных</dd><dt>Готовность</dt><dd>Не проверено</dd></dl>
+              <label>Интервал наблюдения, сек.<input name="observationIntervalSeconds" [(ngModel)]="form.observationIntervalSeconds" required type="number" min="2" max="3600"></label>
+              <label>Таймаут запроса, сек.<input name="requestTimeoutSeconds" [(ngModel)]="form.requestTimeoutSeconds" required type="number" min="1" max="120"></label>
+              <label>Порог устаревания, сек.<input name="staleThresholdSeconds" [(ngModel)]="form.staleThresholdSeconds" required type="number" min="3" max="86400"></label>
+              <p class="hint">Path и query сохраняются. URI с userinfo и fragment отклоняются; смена URI начинает новую эпоху наблюдения.</p>
+              <dl *ngIf="form.id"><dt>Доступность API</dt><dd>{{ selected()?.observation?.httpReachable === null ? 'unknown' : (selected()?.observation?.httpReachable ? 'reachable' : 'unreachable') }}</dd><dt>Heartbeat</dt><dd>{{ selected()?.observation?.heartbeatFresh === null ? 'unknown' : (selected()?.observation?.heartbeatFresh ? 'fresh' : 'stale') }}</dd><dt>Эпоха конфигурации</dt><dd>{{ selected()?.configEpoch || 1 }}</dd></dl>
               <button class="primary" type="submit" [disabled]="loading() || !form.name.trim() || !form.baseUri.trim()">Сохранить</button>
             </form>
           </aside>
