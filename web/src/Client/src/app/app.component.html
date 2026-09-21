@@ -1,0 +1,88 @@
+<main *ngIf="authReady(); else loadingAuth">
+  <section class="login" *ngIf="!user(); else application" aria-labelledby="login-title">
+    <div class="login-panel">
+      <p class="eyebrow">HARNESS CONTROL</p>
+      <h1 id="login-title">Вход в Web управления</h1>
+      <p>Доступ защищён локальным Keycloak. Пароль не хранится в приложении.</p>
+      <p class="error" *ngIf="error()" role="alert">{{ error() }}</p>
+      <button class="primary" type="button" (click)="login()">Войти</button>
+    </div>
+  </section>
+
+  <ng-template #application>
+    <div class="shell">
+      <aside>
+        <div class="brand"><span class="brand-mark">H</span><strong>Harness</strong></div>
+        <nav aria-label="Основные разделы">
+          <button [class.active]="section()==='work'" (click)="open('work')">Работа</button>
+          <button [class.active]="section()==='history'" (click)="open('history')">История</button>
+          <button [class.active]="section()==='nodes'" (click)="open('nodes')">Ноды</button>
+          <button [class.active]="section()==='settings'" (click)="open('settings')">Настройки</button>
+        </nav>
+        <div class="account">
+          <span>{{ user()?.profile?.['preferred_username'] }}</span>
+          <button class="link" type="button" (click)="logout()">Выйти</button>
+        </div>
+      </aside>
+
+      <section class="content">
+        <header>
+          <div>
+            <h1>{{ section()==='work' ? 'Работа' : section()==='history' ? 'История' : section()==='nodes' ? 'Ноды' : 'Настройки' }}</h1>
+            <p *ngIf="section()==='settings'">Подключения Harness · уведомления: {{ realtimeState() }}</p>
+          </div>
+          <button type="button" *ngIf="section()==='settings'" (click)="loadConnections()">Обновить</button>
+        </header>
+
+        <div class="empty-state" *ngIf="section()==='work'">
+          <strong>Активных обращений нет</strong>
+          <span>Выполнение запросов к агентам появится на следующем этапе. Сейчас никаких фиктивных операций не запускается.</span>
+        </div>
+        <div class="empty-state" *ngIf="section()==='history'">
+          <strong>История пуста</strong>
+          <span>Завершённые обращения появятся после подключения Rocket.Chat и Harness.</span>
+        </div>
+        <div class="empty-state" *ngIf="section()==='nodes'">
+          <strong>Наблюдения ещё не выполнялись</strong>
+          <span>API: Не проверено · heartbeat: Нет данных · исполнитель: Нет данных · готовность: Не проверено.</span>
+        </div>
+
+        <div class="settings-layout" *ngIf="section()==='settings'">
+          <section class="table-panel" aria-labelledby="connections-title">
+            <div class="panel-title">
+              <div><h2 id="connections-title">Подключения</h2><span>{{ connections().length }} зарегистрировано</span></div>
+              <button type="button" (click)="clearForm()">Добавить</button>
+            </div>
+            <p class="error banner" *ngIf="error()" role="alert">{{ error() }}</p>
+            <p class="notice banner" *ngIf="notice()" role="status">{{ notice() }}</p>
+            <div class="table-scroll" [attr.aria-busy]="loading()">
+              <table>
+                <thead><tr><th>Имя</th><th>Базовый URI</th><th>Наблюдение</th><th>Обновлено</th></tr></thead>
+                <tbody>
+                  <tr *ngFor="let item of connections(); trackBy: trackConnection" tabindex="0" (click)="select(item)" (keydown.enter)="select(item)" [class.selected]="selected()?.id===item.id">
+                    <td>{{ item.name }}</td><td class="mono">{{ item.baseUri }}</td><td><span class="status unknown">Не проверено</span></td><td>{{ item.updatedAt | date:'dd.MM.yyyy HH:mm' }}</td>
+                  </tr>
+                </tbody>
+              </table>
+              <div class="table-empty" *ngIf="!loading() && connections().length===0">Подключения не зарегистрированы.</div>
+              <div class="table-empty" *ngIf="loading()">Загрузка…</div>
+            </div>
+          </section>
+
+          <aside class="inspector">
+            <div class="inspector-head"><h2>{{ form.id ? 'Подключение' : 'Новое подключение' }}</h2><span *ngIf="form.id" class="status unknown">Не проверено</span></div>
+            <form (ngSubmit)="save()">
+              <label>Имя<input name="name" [(ngModel)]="form.name" required maxlength="80" autocomplete="off"></label>
+              <label>Полный базовый URI<input name="baseUri" [(ngModel)]="form.baseUri" required type="url" placeholder="https://host.example/api/harness/" autocomplete="url"></label>
+              <p class="hint">Path сохраняется полностью. Сетевой запрос к адресу на этом этапе не выполняется.</p>
+              <dl *ngIf="form.id"><dt>Доступность API</dt><dd>Не проверено</dd><dt>Heartbeat</dt><dd>Нет данных</dd><dt>Готовность</dt><dd>Не проверено</dd></dl>
+              <button class="primary" type="submit" [disabled]="loading() || !form.name.trim() || !form.baseUri.trim()">Сохранить</button>
+            </form>
+          </aside>
+        </div>
+      </section>
+    </div>
+  </ng-template>
+</main>
+
+<ng-template #loadingAuth><div class="boot">Проверка сессии…</div></ng-template>

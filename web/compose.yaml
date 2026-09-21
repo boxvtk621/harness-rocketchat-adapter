@@ -1,0 +1,161 @@
+name: hl303
+
+services:
+  client:
+    build:
+      context: ./src/Client
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:18000:8080"
+    depends_on:
+      - gateway
+      - centrifugo
+    networks: [web, internal]
+    deploy:
+      resources:
+        limits: { memory: 128M, cpus: "0.50" }
+
+  gateway:
+    build:
+      context: ./src/Gateway
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_URLS: http://+:8080
+      ADAPTER_BASE_URL: http://adapter:8080/
+      ADAPTER_INTERNAL_TOKEN_FILE: /run/secrets/adapter_internal_token
+      OIDC_METADATA_ADDRESS: http://keycloak:8080/realms/harness/.well-known/openid-configuration
+      OIDC_ISSUER: http://localhost:18080/realms/harness
+      OIDC_AUDIENCE: harness-web
+      CENTRIFUGO_CLIENT_TOKEN_SECRET_FILE: /run/secrets/centrifugo_client_secret
+    secrets: [adapter_internal_token, centrifugo_client_secret]
+    depends_on: [adapter, keycloak]
+    networks: [internal]
+    deploy:
+      resources:
+        limits: { memory: 256M, cpus: "0.75" }
+
+  adapter:
+    build:
+      context: ..
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_URLS: http://+:8080
+      MONGODB_CONNECTION_STRING_FILE: /run/secrets/mongodb_connection_string
+      Mongo__Database: harness_adapter
+      ADAPTER_INTERNAL_TOKEN_FILE: /run/secrets/adapter_internal_token
+      Centrifugo__PublishUrl: http://centrifugo:8000/api/publish
+      CENTRIFUGO_API_KEY_FILE: /run/secrets/centrifugo_api_key
+    secrets: [mongodb_connection_string, adapter_internal_token, centrifugo_api_key]
+    depends_on: [mongodb, centrifugo]
+    networks: [internal]
+    deploy:
+      resources:
+        limits: { memory: 256M, cpus: "0.75" }
+
+  mongodb:
+    image: mongo:8.0.16-noble
+    restart: unless-stopped
+    command: ["mongod", "--bind_ip_all", "--auth"]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME_FILE: /run/secrets/mongodb_root_username
+      MONGO_INITDB_ROOT_PASSWORD_FILE: /run/secrets/mongodb_root_password
+    secrets: [mongodb_root_username, mongodb_root_password]
+    volumes:
+      - mongodb-data:/data/db
+    networks: [internal]
+    deploy:
+      resources:
+        limits: { memory: 512M, cpus: "1.00" }
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.4.2
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/opt/keycloak/bootstrap/start.sh"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_HEALTH_ENABLED: "true"
+      KC_HTTP_ENABLED: "true"
+      DEV_USER_USERNAME: operator
+    secrets: [keycloak_admin_password, keycloak_dev_user_password]
+    configs:
+      - source: keycloak_start
+        target: /opt/keycloak/bootstrap/start.sh
+        mode: 0555
+      - source: keycloak_realm
+        target: /opt/keycloak/data/import/harness-realm.json
+    ports:
+      - "127.0.0.1:18080:8080"
+    command: ["start-dev", "--import-realm"]
+    volumes:
+      - keycloak-data:/opt/keycloak/data
+    networks: [web, internal]
+    deploy:
+      resources:
+        limits: { memory: 768M, cpus: "1.00" }
+
+  centrifugo:
+    image: centrifugo/centrifugo:v5.4.8
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/centrifugo/bootstrap/start.sh"]
+    secrets: [centrifugo_client_secret, centrifugo_api_key]
+    configs:
+      - source: centrifugo_start
+        target: /centrifugo/bootstrap/start.sh
+        mode: 0555
+    networks: [internal]
+    deploy:
+      resources:
+        limits: { memory: 128M, cpus: "0.50" }
+
+  acceptance:
+    profiles: ["acceptance"]
+    build:
+      context: ./tests/e2e
+    environment:
+      BASE_URL: http://localhost:18000
+      DEV_USER_USERNAME: operator
+      DEV_USER_PASSWORD_FILE: /run/secrets/keycloak_dev_user_password
+      OUTPUT_DIR: /output
+    secrets: [keycloak_dev_user_password]
+    volumes:
+      - ./output/acceptance:/output
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - client
+      - keycloak
+    networks: [web]
+    deploy:
+      resources:
+        limits: { memory: 768M, cpus: "1.00" }
+
+configs:
+  keycloak_start:
+    file: ./infra/keycloak/start.sh
+  keycloak_realm:
+    file: ./infra/keycloak/harness-realm.json
+  centrifugo_start:
+    file: ./infra/centrifugo/start.sh
+
+secrets:
+  adapter_internal_token: { file: ./.runtime/secrets/adapter_internal_token }
+  centrifugo_client_secret: { file: ./.runtime/secrets/centrifugo_client_secret }
+  centrifugo_api_key: { file: ./.runtime/secrets/centrifugo_api_key }
+  keycloak_admin_password: { file: ./.runtime/secrets/keycloak_admin_password }
+  keycloak_dev_user_password: { file: ./.runtime/secrets/keycloak_dev_user_password }
+  mongodb_root_username: { file: ./.runtime/secrets/mongodb_root_username }
+  mongodb_root_password: { file: ./.runtime/secrets/mongodb_root_password }
+  mongodb_connection_string: { file: ./.runtime/secrets/mongodb_connection_string }
+
+volumes:
+  mongodb-data:
+    name: hl303-mongodb-data
+  keycloak-data:
+    name: hl303-keycloak-data-v2
+
+networks:
+  web:
+    name: hl303-web
+  internal:
+    name: hl303-internal
+    internal: true

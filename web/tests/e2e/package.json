@@ -1,0 +1,8 @@
+{
+  "name": "hl303-acceptance",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {"acceptance": "node acceptance.mjs"},
+  "dependencies": {"playwright": "1.63.0"}
+}

@@ -2,6 +2,8 @@
 
 ASP.NET Core registry service for Harness connection definitions. It deliberately does **not** contact Harness; each response reports `observationStatus: "not_checked"`.
 
+The repository is the HL-303 monorepo: Adapter lives at the root, while Angular Client, .NET Gateway, Docker Compose, Keycloak and Centrifugo wiring live under [`web/`](web/README.md).
+
 ## Runtime configuration
 
 Only deployment wiring is read from environment variables:
@@ -28,4 +30,12 @@ docker build -t hl-303-adapter .
 docker run --rm -p 8080:8080 -e Mongo__ConnectionString='mongodb://host.docker.internal:27017' -e Mongo__Database=hl303 -e InternalAuth__Token='<secret>' hl-303-adapter
 docker run --rm -v ${PWD}:/src -w /src mcr.microsoft.com/dotnet/sdk:10.0 dotnet restore Adapter.sln --use-lock-file
 docker run --rm -v ${PWD}:/src -w /src mcr.microsoft.com/dotnet/sdk:10.0 dotnet test Adapter.sln --no-restore
+```
+
+For the complete local stack:
+
+```powershell
+cd web
+./scripts/bootstrap.ps1 -Start
+./scripts/accept.ps1
 ```
