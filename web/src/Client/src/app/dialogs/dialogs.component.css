@@ -1,6 +1,5 @@
 :host {
   --dialogs-list-width: 340px;
-  --dialogs-context-width: 380px;
   --dialogs-header-height: 60px;
   --dialogs-subhead-height: 48px;
   --dialogs-composer-height: 162px;
@@ -55,17 +54,16 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 
 .dialogs-grid {
   display: grid;
-  grid-template-columns: var(--dialogs-list-width) minmax(420px, 1fr) var(--dialogs-context-width);
+  grid-template-columns: var(--dialogs-list-width) minmax(420px, 1fr);
   grid-template-rows: minmax(0, 1fr);
   height: auto;
   min-height: 0;
   flex: 1 1 0;
   overflow: hidden;
 }
-.dialog-list, .conversation, .context-pane { min-width: 0; min-height: 0; }
+.dialog-list, .conversation { min-width: 0; min-height: 0; }
 .dialog-list { display: flex; flex-direction: column; border-right: 1px solid var(--line, #deded8); background: var(--surface, #fff); }
 .conversation { position: relative; display: flex; height: 100%; overflow: hidden; flex-direction: column; background: var(--surface, #fff); }
-.context-pane { overflow-y: auto; border-left: 1px solid var(--line, #deded8); background: var(--canvas, #fafaf8); }
 
 .create-dialog { display: grid; grid-template-columns: 1fr auto; gap: var(--space-1, 4px) var(--space-2, 8px); padding: var(--space-2, 8px) var(--space-3, 12px); border-bottom: 1px solid var(--line, #deded8); background: var(--surface-alt, #f8f8f5); }
 .create-title { grid-column: 1 / -1; display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-2, 8px); }
@@ -130,6 +128,27 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .conversation-head, .context-head { display: flex; min-height: var(--dialogs-subhead-height); align-items: center; justify-content: space-between; gap: var(--space-2, 8px); padding: var(--space-1, 4px) var(--space-3, 12px); border-bottom: 1px solid var(--line, #deded8); background: var(--surface-alt, #f8f8f5); }
 .conversation-head h3, .context-head h3 { font-size: 1.077rem; }
 .read-error { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2, 8px); padding: var(--space-1, 4px) var(--space-3, 12px); border-bottom: 1px solid #dfb8b2; background: var(--danger-bg, #fff4f2); color: var(--danger, #9b2d24); }
+.execution-strip {
+  display: grid;
+  min-height: 52px;
+  grid-template-columns: minmax(180px, 1fr) minmax(150px, 210px) minmax(130px, 180px) auto;
+  align-items: center;
+  gap: var(--space-2, 8px);
+  padding: 6px var(--space-3, 12px);
+  border-bottom: 1px solid var(--line, #deded8);
+  background: #f4f7f7;
+}
+.execution-strip-title { display: flex; min-width: 0; align-items: center; gap: 8px; color: var(--focus, #215583); }
+.execution-strip-title > span { display: flex; min-width: 0; flex-direction: column; }
+.execution-strip-title strong { color: var(--ink, #242424); }
+.execution-strip-title small { overflow: hidden; color: var(--muted, #64645e); font-size: .769rem; text-overflow: ellipsis; white-space: nowrap; }
+.execution-strip label { display: grid; min-width: 0; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 6px; color: var(--muted, #64645e); font-size: .769rem; }
+.execution-strip label > span { display: inline-flex; align-items: center; gap: 4px; }
+.execution-strip select { width: 100%; min-height: var(--control, 28px); padding: 0 6px; border: 1px solid var(--line-strong, #85857d); border-radius: var(--radius, 3px); background: var(--surface, #fff); color: var(--ink, #242424); }
+.execution-pagination { display: flex; gap: 4px; }
+.execution-pagination:empty { display: none; }
+.execution-pagination button { min-height: var(--control, 28px); padding: 0 7px; border: 1px solid var(--line-strong, #85857d); border-radius: var(--radius, 3px); background: var(--surface, #fff); color: var(--focus, #215583); cursor: pointer; }
+.execution-error { margin: 0; padding: 6px var(--space-3, 12px); border-bottom: 1px solid #dfb8b2; background: var(--danger-bg, #fff4f2); color: var(--danger, #9b2d24); }
 .messages { min-height: 0; overflow-y: auto; flex: 1 1 0; scroll-behavior: smooth; padding: var(--space-3, 12px) clamp(12px, 3vw, 44px) var(--space-4, 16px); }
 .load-older { display: block; min-height: var(--control, 28px); margin: 0 auto var(--space-3, 12px); padding: 0 var(--space-2, 8px); border: 1px solid var(--line-strong, #85857d); border-radius: var(--radius, 3px); background: var(--surface, #fff); color: var(--focus, #215583); cursor: pointer; }
 .message { max-width: 75ch; margin: 0 0 var(--space-3, 12px); border: 1px solid var(--line, #deded8); border-left-width: 3px; background: var(--dialogs-assistant-bg); }
@@ -212,19 +231,22 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .mono { font-family: Consolas, "Courier New", monospace; font-size: .923em; }
 
 @media (max-width: 1180px) {
-  :host { --dialogs-list-width: 300px; --dialogs-context-width: 320px; }
-  .dialogs-grid { grid-template-columns: var(--dialogs-list-width) minmax(380px, 1fr) var(--dialogs-context-width); }
+  :host { --dialogs-list-width: 300px; }
+  .dialogs-grid { grid-template-columns: var(--dialogs-list-width) minmax(380px, 1fr); }
+  .execution-strip { grid-template-columns: minmax(160px, 1fr) minmax(140px, 190px) minmax(120px, 160px); }
+  .execution-pagination { grid-column: 1 / -1; }
 }
 
 @media (max-width: 900px) {
   :host { height: auto; }
   .dialogs-screen { height: auto; }
   .dialogs-grid { display: flex; height: auto; max-height: none; overflow: visible; flex-direction: column; }
-  .dialog-list, .conversation, .context-pane { width: 100%; border: 0; border-bottom: 1px solid var(--line, #deded8); }
+  .dialog-list, .conversation { width: 100%; border: 0; border-bottom: 1px solid var(--line, #deded8); }
   .dialog-rows { max-height: 300px; }
   .conversation { height: min(720px, calc(100vh - 24px)); min-height: 560px; }
   .messages { min-height: 300px; }
-  .context-pane { max-height: none; overflow: visible; }
+  .execution-strip { grid-template-columns: 1fr 1fr; }
+  .execution-strip-title { grid-column: 1 / -1; }
 }
 
 @media (max-width: 520px) {
@@ -238,6 +260,9 @@ button:disabled { cursor: not-allowed; opacity: .56; }
   .format-hint { width: 100%; white-space: normal; }
   .composer-foot .primary { width: 100%; }
   .execution-selects { grid-template-columns: 1fr; }
+  .execution-strip { grid-template-columns: 1fr; }
+  .execution-strip-title, .execution-pagination { grid-column: 1; }
+  .execution-strip label { grid-template-columns: 82px minmax(0, 1fr); }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -15,7 +15,7 @@ const nodeId = id(1), dialogId = id(2), requestId = id(3), attemptId = id(4), to
 const requestId2 = id(13), attemptId2 = id(14), toolId2 = id(15);
 const retryAttemptId = id(16), retryToolId = id(17);
 const requestId3 = id(23), attemptId3 = id(24), toolId3 = id(25);
-const deepDialogId = id(32), deepRequestId = id(33), deepDecoyRequestId = id(34), deepAttemptId = id(35);
+const deepDialogId = id(32), deepRequestId = id(33), deepDecoyRequestId = id(34), deepAttemptId = id(35), deepToolId = id(36);
 const now = '2026-09-21T16:00:00Z';
 const safe = (content, truncated = false) => ({ kind: 'inline', content, redaction: 'none', truncated });
 const node = { connectionId: 'fixture', name: 'Тестовый Harness · UI fixture', configEpoch: 1, identityStatus: 'unique', observation: {
@@ -56,6 +56,7 @@ const failedTool = { toolCallId: id(6), toolName: 'fixture_failure', state: 'fai
 const summary2 = { toolCallId: toolId2, toolName: 'render_markdown_fixture', state: 'succeeded', startedAt: now, finishedAt: now, detailVersion: 1 };
 const retrySummary = { toolCallId: retryToolId, toolName: 'failed_retry_fixture', state: 'failed', startedAt: now, finishedAt: now, detailVersion: 1 };
 const summary3 = { toolCallId: toolId3, toolName: 'running_fixture', state: 'running', startedAt: now, detailVersion: 1 };
+const deepSummary = { toolCallId: deepToolId, toolName: 'read_history_fixture', state: 'succeeded', startedAt: now, finishedAt: now, detailVersion: 1 };
 const envelope = { protocolVersion: 1, schemaId: 'harness-wire-v2', nodeId, epoch: 1, snapshotStateVersion: 90, stateVersion: 90, lastEventSeq: 90 };
 const pageDto = (items, pageType, extra = {}) => ({ ...envelope, items, nextCursor: null, pageType, ...extra });
 const canonical = x => x === null || typeof x !== 'object' ? JSON.stringify(x) : Array.isArray(x) ? `[${x.map(canonical).join(',')}]` : `{${Object.keys(x).sort().map(k => `${JSON.stringify(k)}:${canonical(x[k])}`).join(',')}}`;
@@ -123,6 +124,7 @@ await page.route('**/api/dialogs/**', async route => {
   if (path === `attempts/${attemptId2}/tool-calls`) return json(pageDto([summary2], 'tool_calls', { schemaId: 'tool-timeline-v1', dialogId, requestId: requestId2, attemptId: attemptId2 }));
   if (path === `attempts/${retryAttemptId}/tool-calls`) return json(pageDto([retrySummary], 'tool_calls', { schemaId: 'tool-timeline-v1', dialogId, requestId: requestId2, attemptId: retryAttemptId }));
   if (path === `attempts/${attemptId3}/tool-calls`) return json(pageDto([summary3], 'tool_calls', { schemaId: 'tool-timeline-v1', dialogId, requestId: requestId3, attemptId: attemptId3 }));
+  if (path === `attempts/${deepAttemptId}/tool-calls`) return json(pageDto([deepSummary], 'tool_calls', { schemaId: 'tool-timeline-v1', dialogId: deepDialogId, requestId: deepRequestId, attemptId: deepAttemptId }));
   if (path?.startsWith(`attempts/${attemptId}/tool-calls/`)) {
     detailFetches++;
     const selected = path.endsWith(toolId) ? summary : failedTool;
@@ -166,12 +168,14 @@ try {
   await page.getByTestId(`inline-tool-call-${toolId2}`).waitFor({ state: 'attached' });
   await page.getByTestId(`inline-tool-call-${retryToolId}`).waitFor({ state: 'attached' });
   await page.getByTestId(`inline-tool-call-${toolId3}`).waitFor();
+  assert.equal(await page.locator('.context-pane').count(), 0, 'Execution inspector no longer consumes a permanent right column');
+  assert.ok(await page.locator('.execution-strip').isVisible(), 'Request and attempt navigation stays compact above the conversation');
   const scroller = page.getByTestId('messages-scroll');
   const assertAtBottom = async label => poll(async () => assert.ok(await scroller.evaluate(el => el.scrollHeight - el.scrollTop - el.clientHeight < 40)), label);
   await assertAtBottom('Opening a dialog settles at the latest rendered Markdown/activity');
   assert.equal(await page.locator('app-tool-activity').count(), 4, 'Each request/attempt, including a failed retry without an answer, keeps a distinct inline activity group');
   const firstGroup = page.getByTestId(`inline-tool-call-${toolId}`).locator('xpath=ancestor::details');
-  await firstGroup.locator('summary').click();
+  await firstGroup.locator(':scope > summary').click();
   const runningGroup = page.getByTestId(`inline-tool-call-${toolId3}`).locator('xpath=ancestor::details');
   assert.ok(await runningGroup.getAttribute('open') !== null, 'Running activity opens by default');
   const secondGroup = page.getByTestId(`inline-tool-call-${toolId2}`).locator('xpath=ancestor::details');
@@ -213,9 +217,18 @@ try {
   assert.equal(detailFetches, 0, 'Tool details must load lazily');
   await page.getByTestId(`inline-tool-call-${toolId}`).click();
   await page.getByTestId('tool-details').waitFor();
-  await page.getByTestId('tool-details').getByText('Поток вывода', { exact: false }).click();
-  await page.getByRole('button', { name: 'Загрузить ещё вывод', exact: true }).click();
+  assert.equal(await page.getByTestId('tool-details').locator('xpath=ancestor::app-tool-activity').count(), 1, 'Operation details stay inline with their chat activity group');
+  assert.ok((await page.getByTestId('tool-details').innerText()).includes('Что было передано'));
+  assert.ok((await page.getByTestId('tool-details').innerText()).includes('Что получилось'));
+  await page.getByTestId('tool-details').getByText('Журнал вывода', { exact: false }).click();
+  await page.getByRole('button', { name: 'Загрузить продолжение', exact: true }).click();
   await poll(async () => assert.ok((await page.getByTestId('tool-details').innerText()).includes('Последняя часть результата')), 'Bounded tool output continuation');
+  const inlineOperation = page.getByTestId('tool-details').locator('xpath=ancestor::app-tool-activity');
+  await inlineOperation.screenshot({ path: join(out, 'hl311-inline-operation-qhd.png') });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await inlineOperation.scrollIntoViewIfNeeded();
+  await inlineOperation.screenshot({ path: join(out, 'hl311-inline-operation-390.png') });
+  await page.setViewportSize({ width: 2560, height: 1440 });
   const composerBox = await page.getByTestId('message-input').boundingBox();
   assert.ok(composerBox && composerBox.y + composerBox.height <= 1440, 'Composer remains in QHD viewport');
   assert.ok(await page.evaluate(() => document.documentElement.scrollHeight <= innerHeight + 1), 'Desktop workspace scrolls internally');
@@ -240,8 +253,8 @@ try {
   const reloadedInlineTool = page.getByTestId(`inline-tool-call-${toolId}`);
   await reloadedInlineTool.waitFor({ state: 'attached' });
   const reloadedGroup = reloadedInlineTool.locator('xpath=ancestor::details');
-  if (await reloadedGroup.getAttribute('open') === null) await reloadedGroup.locator('summary').click();
-  await reloadedInlineTool.click();
+  if (await reloadedGroup.getAttribute('open') === null) await reloadedGroup.locator(':scope > summary').click();
+  if (await reloadedInlineTool.getAttribute('aria-expanded') !== 'true') await reloadedInlineTool.click();
   await page.getByTestId('tool-details').waitFor();
   await page.screenshot({ path: join(out, 'dialogs-fixture-qhd.png'), fullPage: true });
   await page.getByTestId('message-input').focus();
@@ -311,8 +324,14 @@ try {
   await historyRow.waitFor();
   await historyRow.click();
   assert.equal(await page.getByTestId('history-table').count(), 0, 'History no longer uses a stretched full-width table');
+  assert.equal(await historyRow.locator('strong').first().innerText(), 'Покажи Markdown и отдельные действия.', 'Request text is the primary history label');
+  assert.ok((await historyRow.locator('small').innerText()).includes('Сессия: Проверка Markdown и действий'), 'Session title is secondary metadata');
+  assert.equal(await page.getByTestId('history-request-title').innerText(), 'Покажи Markdown и отдельные действия.', 'Request text is the inspector heading');
   assert.equal(await page.getByTestId('history-inspector').locator('h1').innerText(), 'Проверка GFM', 'Exact request answer renders as readable Markdown');
   assert.ok((await page.getByTestId('history-inspector').innerText()).includes('Покажи Markdown и отдельные действия.'));
+  await page.getByTestId(`history-tool-${deepToolId}`).waitFor();
+  assert.ok((await page.getByTestId('history-tools').innerText()).includes('read history fixture'), 'Exact request card shows the tool used for its answer');
+  assert.ok((await page.getByTestId('history-tools').innerText()).includes('Завершено'), 'Tool outcome is visible in history');
   await page.setViewportSize({ width: 2560, height: 1440 });
   await page.screenshot({ path: join(out, 'hl311-followup-history-qhd.png') });
   await page.setViewportSize({ width: 640, height: 360 });
@@ -354,7 +373,7 @@ try {
   await page.getByTestId('nav-work').click();
   await poll(async () => assert.equal(await page.locator('app-dialogs').isVisible(), false), 'Hidden dialogs must not leak into other screens');
   assert.deepEqual(runtimeErrors, []);
-  await writeFile(join(out, 'dialogs-ui-evidence.json'), JSON.stringify({ mode: 'controlled public API DTO fixtures; not provider execution', posts, detailFetches, historyFetches, providerCalls: 0, checks: ['Enter sends exactly once', 'Shift+Enter newline', 'IME Enter is inert', 'disabled composer is inert', 'open/send/new/update/activity-height auto-scroll', 'older-page anchor', 'unchanged refetch has no scroll loop', 'compact request/attempt execution navigation', 'unified Nodes owns connection editor/provider auth/diagnostics', 'duplicating Settings navigation removed', 'History exact request answer Markdown and dialog deep-link', 'four request/attempt-scoped activity groups including failed retry without response', 'live activity before response', 'exact response anchor', 'lazy details', 'older inline detail/output pagination outside current inspector page', 'safe GFM structures', 'partial-to-final message versions without duplicate DOM', 'raw HTML and dangerous URL inert', 'no external Markdown image requests', 'exact fenced-source copy', 'long code/table local overflow', 'retained data/draft', 'reconnect refetch without command replay', 'blocked auth preserves history', 'tool output continuation', 'keyboard focus', 'pending IDs only', 'reload receipt no replay', 'QHD/390/laptop screenshots', 'History effective 200% zoom viewport without page overflow'] }, null, 2));
+  await writeFile(join(out, 'dialogs-ui-evidence.json'), JSON.stringify({ mode: 'controlled public API DTO fixtures; not provider execution', posts, detailFetches, historyFetches, providerCalls: 0, checks: ['Enter sends exactly once', 'Shift+Enter newline', 'IME Enter is inert', 'disabled composer is inert', 'open/send/new/update/activity-height auto-scroll', 'older-page anchor', 'unchanged refetch has no scroll loop', 'compact request/attempt navigation above chat', 'operation details expand inline without a permanent right inspector', 'unified Nodes owns connection editor/provider auth/diagnostics', 'duplicating Settings navigation removed', 'History exact request answer Markdown and dialog deep-link', 'four request/attempt-scoped activity groups including failed retry without response', 'live activity before response', 'exact response anchor', 'lazy inline details', 'inline detail/output pagination remains attached to its operation', 'safe GFM structures', 'partial-to-final message versions without duplicate DOM', 'raw HTML and dangerous URL inert', 'no external Markdown image requests', 'exact fenced-source copy', 'long code/table local overflow', 'retained data/draft', 'reconnect refetch without command replay', 'blocked auth preserves history', 'tool output continuation', 'keyboard focus', 'pending IDs only', 'reload receipt no replay', 'QHD/390/laptop screenshots', 'History effective 200% zoom viewport without page overflow'] }, null, 2));
   console.log('PASS HL-311 follow-up controlled DTO fixtures: Enter/IME, render-aware auto-scroll, compact execution context, safe/versioned GFM and zero provider calls.');
 } catch (error) {
   await page.screenshot({ path: join(out, 'dialogs-ui-failure.png'), fullPage: true }).catch(() => {});

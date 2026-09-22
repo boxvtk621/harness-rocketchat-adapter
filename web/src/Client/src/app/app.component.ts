@@ -1,5 +1,5 @@
 import { CommonModule } from '@angular/common';
-import { HttpClient, HttpErrorResponse, HttpHeaders } from '@angular/common/http';
+import { HttpClient, HttpErrorResponse, HttpHeaders, HttpParams } from '@angular/common/http';
 import { Component, OnDestroy, OnInit, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { Centrifuge, Subscription } from 'centrifuge';
@@ -9,6 +9,9 @@ import { DialogsComponent } from './dialogs/dialogs.component';
 import { ProviderAuthComponent } from './provider-auth.component';
 import { MarkdownRendererComponent } from './markdown/markdown-renderer.component';
 import { UiIconComponent } from './ui-icon.component';
+import { firstValueFrom } from 'rxjs';
+import { ToolCallSummary } from './dialogs/dialogs.models';
+import { toolCallDuration } from './dialogs/tool-activity';
 
 interface Observation {
   attemptedAt: string | null;
@@ -71,6 +74,12 @@ interface AttemptProjection {
   updatedAt?: string | null;
   completedAt?: string | null;
   result?: string | null;
+  generation?: number;
+}
+
+interface HarnessPage<T> {
+  items: T[];
+  nextCursor?: string | null;
 }
 
 interface WorkProjection {
@@ -144,13 +153,19 @@ interface HistoryRow {
   nodeName?: string | null;
   dialogId: string;
   requestId: string | null;
-  title: string | null;
+  requestTitle: string | null;
+  dialogTitle: string | null;
   status: string;
   effectStatus: string | null;
   createdAt: string | null;
   completedAt: string | null;
   result: string | null;
   messages: MessageProjection[];
+}
+
+interface HistoryToolUsage extends ToolCallSummary {
+  attemptId: string;
+  attemptGeneration: number;
 }
 
 interface ManagedNodeRow {
@@ -200,6 +215,10 @@ export class AppComponent implements OnInit, OnDestroy {
 
   readonly selectedWorkId = signal<string | null>(null);
   readonly selectedHistoryId = signal<string | null>(null);
+  readonly historyTools = signal<HistoryToolUsage[]>([]);
+  readonly historyToolsLoading = signal(false);
+  readonly historyToolsError = signal('');
+  readonly historyToolsPartial = signal(false);
   readonly selectedNodeId = signal<string | null>(null);
   readonly selectedConnectionId = signal<string | null>(null);
 
@@ -225,6 +244,7 @@ export class AppComponent implements OnInit, OnDestroy {
   private readonly inFlight = new Set<Resource>();
   private readonly pending = new Set<Resource>();
   private readonly queuedResources = new Set<RefreshTarget>();
+  private historyToolsLoadRevision = 0;
   private readonly users = new UserManager({
     authority: runtimeConfig.oidcAuthority,
     client_id: runtimeConfig.oidcClientId,
@@ -340,7 +360,10 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   selectWork(item: WorkProjection): void { this.selectedWorkId.set(this.workKey(item)); }
-  selectHistory(item: HistoryRow): void { this.selectedHistoryId.set(item.key); }
+  selectHistory(item: HistoryRow): void {
+    this.selectedHistoryId.set(item.key);
+    void this.loadHistoryTools(item);
+  }
   selectNode(item: NodeProjection): void { this.selectedNodeId.set(item.connectionId); }
 
   selectManagedNode(item: ManagedNodeRow): void {
@@ -468,7 +491,8 @@ export class AppComponent implements OnInit, OnDestroy {
           nodeName: dialog.nodeName,
           dialogId: dialog.dialogId,
           requestId: request.requestId || null,
-          title: request.title ?? dialog.title,
+          requestTitle: request.title ?? null,
+          dialogTitle: dialog.title,
           status: request.status ?? 'completed',
           effectStatus: request.effectStatus ?? null,
           createdAt: request.createdAt ?? null,
@@ -484,7 +508,8 @@ export class AppComponent implements OnInit, OnDestroy {
         nodeName: dialog.nodeName,
         dialogId: dialog.dialogId,
         requestId: dialog.requestId ?? null,
-        title: dialog.requestTitle ?? dialog.title,
+        requestTitle: dialog.requestTitle ?? null,
+        dialogTitle: dialog.title,
         status: dialog.status ?? 'completed',
         effectStatus: dialog.effectStatus ?? null,
         createdAt: dialog.createdAt,
@@ -498,7 +523,7 @@ export class AppComponent implements OnInit, OnDestroy {
   filteredHistory(): HistoryRow[] {
     const query = this.historyQuery.trim().toLocaleLowerCase('ru');
     return this.historyRows().filter(item => {
-      const text = [this.historyTitle(item), this.historyNodeName(item), item.requestId, item.dialogId, this.resultText(item)].join(' ').toLocaleLowerCase('ru');
+      const text = [this.historyTitle(item), this.historySessionTitle(item), this.historyNodeName(item), item.requestId, item.dialogId, this.resultText(item)].join(' ').toLocaleLowerCase('ru');
       const statusMatches = this.historyStatus === 'all' || this.historyStatusKey(item.status) === this.historyStatus;
       const nodeMatches = this.historyNode === 'all' || item.connectionId === this.historyNode;
       return (!query || text.includes(query)) && statusMatches && nodeMatches;
@@ -543,13 +568,11 @@ export class AppComponent implements OnInit, OnDestroy {
 
   workTitle(item: WorkProjection): string { return item.requestTitle ?? item.title ?? item.dialogTitle ?? 'Обращение без названия'; }
   historyTitle(item: HistoryRow): string {
-    if (item.title) return item.title;
-    const request = item.messages.find(message => message.role.toLocaleLowerCase('ru') === 'user' && message.text)?.text?.trim();
-    return request ? this.truncate(request, 72) : 'Завершённое обращение';
+    return this.requestMessageText(item) ?? item.requestTitle?.trim() ?? 'Завершённое обращение';
   }
-  historyExcerpt(item: HistoryRow): string {
-    const answer = this.historyAnswer(item);
-    return this.truncate(answer ?? this.requestText(item), 112);
+  historyListTitle(item: HistoryRow): string { return this.truncate(this.historyTitle(item), 112); }
+  historySessionTitle(item: HistoryRow): string {
+    return item.dialogTitle?.trim() || 'Сессия без названия';
   }
 
   historyAnswer(item: HistoryRow): string | null {
@@ -692,8 +715,44 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   requestText(item: HistoryRow): string {
-    return item.messages.find(message => message.role.toLocaleLowerCase('ru') === 'user' && message.text?.trim())?.text?.trim()
-      ?? 'Текст обращения не предоставлен.';
+    return this.requestMessageText(item) ?? item.requestTitle?.trim() ?? 'Текст обращения не предоставлен.';
+  }
+
+  historyToolKind(tool: HistoryToolUsage): string {
+    const name = tool.toolName.toLocaleLowerCase('en');
+    if (/command|shell|terminal|exec/.test(name)) return 'Терминал';
+    if (/read|fetch|get|open/.test(name)) return 'Чтение';
+    if (/write|edit|patch|change/.test(name)) return 'Изменение';
+    if (/find|search|query|list/.test(name)) return 'Поиск';
+    if (/browser|navigate|click/.test(name)) return 'Браузер';
+    return 'Инструмент';
+  }
+
+  historyToolName(tool: HistoryToolUsage): string { return tool.toolName.replace(/[._-]+/g, ' '); }
+  historyToolDuration(tool: HistoryToolUsage): string { return toolCallDuration(tool); }
+  historyToolStateLabel(tool: HistoryToolUsage): string {
+    if (tool.state === 'running') return 'Выполняется';
+    if (tool.state === 'succeeded') return 'Завершено';
+    if (tool.state === 'failed') return 'Ошибка';
+    return 'Исход неизвестен';
+  }
+  historyToolStateClass(tool: HistoryToolUsage): string {
+    if (tool.state === 'succeeded') return 'done';
+    if (tool.state === 'failed') return 'failed';
+    if (tool.state === 'running') return 'running';
+    return 'unknown';
+  }
+  historyToolsCountLabel(): string {
+    const count = this.historyTools().length;
+    const remainder = count % 100;
+    const digit = count % 10;
+    const noun = remainder >= 11 && remainder <= 14 ? 'операций' : digit === 1 ? 'операция' : digit >= 2 && digit <= 4 ? 'операции' : 'операций';
+    return `${count} ${noun}`;
+  }
+  trackHistoryTool(_: number, tool: HistoryToolUsage): string { return `${tool.attemptId}:${tool.toolCallId}`; }
+  retryHistoryTools(): void {
+    const selected = this.selectedHistory();
+    if (selected) void this.loadHistoryTools(selected);
   }
 
   connectionFor(connectionId: string): Connection | undefined { return this.connections().find(item => item.id === connectionId); }
@@ -705,6 +764,65 @@ export class AppComponent implements OnInit, OnDestroy {
   readonly trackWork = (_: number, item: WorkProjection): string => this.workKey(item);
   trackHistory(_: number, item: HistoryRow): string { return item.key; }
   safeTestId(value: string): string { return value.replace(/[^a-zA-Z0-9_-]/g, '-'); }
+
+  private requestMessageText(item: HistoryRow): string | null {
+    return item.messages.find(message => message.role.toLocaleLowerCase('ru') === 'user' && message.text?.trim())?.text?.trim() ?? null;
+  }
+
+  private async loadHistoryTools(item: HistoryRow): Promise<void> {
+    const revision = ++this.historyToolsLoadRevision;
+    this.historyTools.set([]);
+    this.historyToolsError.set('');
+    this.historyToolsPartial.set(false);
+    this.historyToolsLoading.set(false);
+    if (!item.requestId) return;
+
+    const connection = this.connectionFor(item.connectionId);
+    const headers = this.headers();
+    if (!connection || !headers) {
+      this.historyToolsError.set('Не удалось определить подключение для этого обращения.');
+      return;
+    }
+
+    this.historyToolsLoading.set(true);
+    const base = `/api/dialogs/${encodeURIComponent(item.connectionId)}/nodes/${encodeURIComponent(item.nodeId)}`;
+    const common = new HttpParams().set('configEpoch', connection.configEpoch).set('limit', 100);
+    try {
+      const attempts = await this.readHistoryPages<AttemptProjection>(`${base}/attempts`, common.set('requestId', item.requestId), headers);
+      const toolPages = await Promise.all(attempts.items.map(attempt => this.readHistoryPages<ToolCallSummary>(
+        `${base}/attempts/${encodeURIComponent(attempt.attemptId)}/tool-calls`,
+        common,
+        headers
+      )));
+      if (revision !== this.historyToolsLoadRevision || this.selectedHistoryId() !== item.key) return;
+      this.historyTools.set(toolPages.flatMap((page, index) => page.items.map(tool => ({
+        ...tool,
+        attemptId: attempts.items[index].attemptId,
+        attemptGeneration: attempts.items[index].generation ?? index + 1
+      }))).sort((left, right) => Date.parse(left.startedAt) - Date.parse(right.startedAt)));
+      this.historyToolsPartial.set(attempts.partial || toolPages.some(page => page.partial));
+    } catch {
+      if (revision === this.historyToolsLoadRevision && this.selectedHistoryId() === item.key) {
+        this.historyToolsError.set('Не удалось загрузить операции именно этого обращения.');
+      }
+    } finally {
+      if (revision === this.historyToolsLoadRevision) this.historyToolsLoading.set(false);
+    }
+  }
+
+  private async readHistoryPages<T>(url: string, initialParams: HttpParams, headers: HttpHeaders): Promise<{ items: T[]; partial: boolean }> {
+    const items: T[] = [];
+    let cursor: string | null = null;
+    let pages = 0;
+    do {
+      const params: HttpParams = cursor ? initialParams.set('cursor', cursor) : initialParams;
+      const page: HarnessPage<T> = await firstValueFrom(this.http.get<HarnessPage<T>>(url, { headers, params }));
+      items.push(...page.items);
+      cursor = page.nextCursor ?? null;
+      pages++;
+    } while (cursor && pages < 10);
+    return { items, partial: !!cursor };
+  }
 
   private loadProjection(kind: 'nodes' | 'work' | 'history', showLoading = true): void {
     const headers = this.headers();

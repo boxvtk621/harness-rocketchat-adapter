@@ -908,6 +908,13 @@ export class DialogsComponent implements OnChanges, OnDestroy {
     await this.selectToolCall(selection.toolCall, selection.attemptId);
   }
 
+  closeInlineTool(): void {
+    this.toolGeneration++;
+    this.selectedToolCallId.set(null);
+    this.toolDetail.set(null);
+    this.toolLoading.set(false);
+  }
+
   async loadMoreInlineActivity(group: ToolActivityGroup): Promise<void> {
     const dialog = this.selectedDialog();
     if (!dialog || !group.pagination.nextCursor || group.pagination.loading) return;

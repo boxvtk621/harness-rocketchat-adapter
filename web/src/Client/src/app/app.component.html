@@ -87,7 +87,7 @@
 
         <section data-testid="screen-history" *ngIf="section()==='history'" class="screen">
           <div class="toolbar" aria-label="Фильтры истории">
-            <label class="search-field"><span class="sr-only">Поиск в истории</span><input data-testid="history-search" type="search" [(ngModel)]="historyQuery" placeholder="Название, результат или нода"></label>
+            <label class="search-field"><span class="sr-only">Поиск в истории</span><input data-testid="history-search" type="search" [(ngModel)]="historyQuery" placeholder="Текст запроса, ответ или нода"></label>
             <label><span class="sr-only">Результат обращения</span><select data-testid="history-status" [(ngModel)]="historyStatus"><option value="all">Все результаты</option><option value="completed">Завершено</option><option value="failed">Ошибка</option><option value="cancelled">Отменено</option><option value="interrupted">Прервано</option><option value="unknown">Исход неизвестен</option></select></label>
             <label><span class="sr-only">Нода</span><select data-testid="history-node" [(ngModel)]="historyNode"><option value="all">Все ноды</option><option *ngFor="let node of nodes(); trackBy: trackNode" [value]="node.connectionId">{{ nodeName(node) }}</option></select></label>
           </div>
@@ -104,7 +104,7 @@
                   [attr.aria-pressed]="selectedHistoryId()===item.key"
                   [attr.data-testid]="'history-row-' + safeTestId(item.key)"
                   (click)="selectHistory(item)">
-                  <span class="history-row-main"><strong>{{ historyTitle(item) }}</strong><small>{{ historyExcerpt(item) }}</small></span>
+                  <span class="history-row-main"><strong>{{ historyListTitle(item) }}</strong><small>Сессия: {{ historySessionTitle(item) }}</small></span>
                   <span class="history-row-meta"><span>{{ historyNodeName(item) }}</span><span [class]="'status ' + statusClass(item.status, item.effectStatus)">{{ statusLabel(item.status, item.effectStatus) }}</span><time>{{ item.completedAt ? (item.completedAt | date:'dd.MM HH:mm') : 'Время не подтверждено' }}</time></span>
                 </button>
               </div>
@@ -114,18 +114,39 @@
             </section>
             <article data-testid="history-inspector" class="history-reader" aria-label="Результат обращения">
               <ng-container *ngIf="selectedHistory() as item; else noHistorySelection">
-                <header class="history-reader-head">
-                  <div><p>{{ historyNodeName(item) }} · {{ item.completedAt ? (item.completedAt | date:'dd.MM.yyyy HH:mm') : 'время не подтверждено' }}</p><h2>{{ historyTitle(item) }}</h2></div>
-                  <div class="reader-actions"><span [class]="'status ' + statusClass(item.status, item.effectStatus)">{{ statusLabel(item.status, item.effectStatus) }}</span><button type="button" class="icon-label" (click)="openHistoryDialog(item)"><ui-icon name="open" />Открыть в диалоге</button></div>
-                </header>
-                <section class="history-question"><h3>Вопрос</h3><p class="preserve">{{ requestText(item) }}</p></section>
-                <section class="history-answer"><h3>Ответ</h3>
-                  <app-markdown-renderer *ngIf="historyAnswer(item) as answer; else absentHistoryAnswer" [identity]="historyAnswerIdentity(item)" [version]="historyAnswerVersion(item)" [content]="answer" />
-                  <ng-template #absentHistoryAnswer><p class="history-absent">Ответ отсутствует в публичной проекции именно этого обращения.</p></ng-template>
-                </section>
-                <details class="history-diagnostics"><summary>Диагностика</summary><dl><dt>Request ID</dt><dd class="mono wrap">{{ item.requestId || 'Нет данных' }}</dd><dt>Dialog ID</dt><dd class="mono wrap">{{ item.dialogId }}</dd><dt>Node ID</dt><dd class="mono wrap">{{ item.nodeId }}</dd></dl></details>
+                <div class="history-request-card">
+                  <header class="history-reader-head">
+                    <div class="history-reader-heading">
+                      <p class="history-session">Сессия: <strong>{{ historySessionTitle(item) }}</strong></p>
+                      <h2 data-testid="history-request-title" class="preserve">{{ historyTitle(item) }}</h2>
+                      <p>{{ historyNodeName(item) }} · {{ item.completedAt ? (item.completedAt | date:'dd.MM.yyyy HH:mm') : 'время не подтверждено' }}</p>
+                    </div>
+                    <div class="reader-actions"><span [class]="'status ' + statusClass(item.status, item.effectStatus)">{{ statusLabel(item.status, item.effectStatus) }}</span><button type="button" class="icon-label" (click)="openHistoryDialog(item)"><ui-icon name="open" />Открыть в диалоге</button></div>
+                  </header>
+                  <section class="history-answer"><h3>Ответ</h3>
+                    <app-markdown-renderer *ngIf="historyAnswer(item) as answer; else absentHistoryAnswer" [identity]="historyAnswerIdentity(item)" [version]="historyAnswerVersion(item)" [content]="answer" />
+                    <ng-template #absentHistoryAnswer><p class="history-absent">Ответ отсутствует в публичной проекции именно этого обращения.</p></ng-template>
+                  </section>
+                  <section data-testid="history-tools" class="history-tools" aria-labelledby="history-tools-title">
+                    <div class="history-section-head">
+                      <div><h3 id="history-tools-title">Использованные инструменты</h3><p *ngIf="historyTools().length">{{ historyToolsCountLabel() }} в {{ historyTools().length === 1 ? 'ответе' : 'обработке запроса' }}</p></div>
+                    </div>
+                    <p class="history-tools-state" *ngIf="historyToolsLoading()" role="status">Загружаем операции этого запроса…</p>
+                    <div class="history-tools-state error" *ngIf="!historyToolsLoading() && historyToolsError()" role="alert"><span>{{ historyToolsError() }}</span><button type="button" (click)="retryHistoryTools()">Повторить</button></div>
+                    <ol class="history-tool-list" *ngIf="!historyToolsLoading() && !historyToolsError() && historyTools().length">
+                      <li *ngFor="let tool of historyTools(); let index = index; trackBy: trackHistoryTool" [attr.data-testid]="'history-tool-' + safeTestId(tool.toolCallId)">
+                        <span class="history-tool-index" aria-hidden="true">{{ index + 1 }}</span>
+                        <span class="history-tool-main"><span class="history-tool-kind">{{ historyToolKind(tool) }}</span><strong>{{ historyToolName(tool) }}</strong><small>Попытка {{ tool.attemptGeneration }} · {{ historyToolDuration(tool) }}</small></span>
+                        <span [class]="'history-tool-status ' + historyToolStateClass(tool)">{{ historyToolStateLabel(tool) }}</span>
+                      </li>
+                    </ol>
+                    <p class="history-tools-state" *ngIf="!historyToolsLoading() && !historyToolsError() && !historyTools().length">Для ответа на этот запрос инструменты не использовались.</p>
+                    <p class="history-tools-note" *ngIf="historyToolsPartial()">Показаны первые 1000 операций на попытку.</p>
+                  </section>
+                  <details class="history-diagnostics"><summary>Технические данные</summary><dl><dt>Request ID</dt><dd class="mono wrap">{{ item.requestId || 'Нет данных' }}</dd><dt>Dialog ID</dt><dd class="mono wrap">{{ item.dialogId }}</dd><dt>Node ID</dt><dd class="mono wrap">{{ item.nodeId }}</dd></dl></details>
+                </div>
               </ng-container>
-              <ng-template #noHistorySelection><div class="empty-state"><strong>Выберите обращение</strong><span>Вопрос и точный ответ откроются здесь.</span></div></ng-template>
+              <ng-template #noHistorySelection><div class="empty-state"><strong>Выберите обращение</strong><span>Запрос, ответ и использованные инструменты откроются здесь.</span></div></ng-template>
             </article>
           </div>
         </section>

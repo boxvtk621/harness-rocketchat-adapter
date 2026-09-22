@@ -1,45 +1,66 @@
-<details
-  class="agent-activity"
-  [open]="open"
-  [attr.data-state]="group.state"
-  [attr.data-attempt-id]="group.attemptId"
-  (toggle)="toggle($event)">
+<details class="agent-activity" [open]="open" [attr.data-state]="group.state" [attr.data-attempt-id]="group.attemptId" (toggle)="toggle($event)">
   <summary>
-    <span class="summary-mark" aria-hidden="true"></span>
-    <strong>Действия агента</strong>
-    <span class="summary-meta">{{ group.pagination.hasMore ? group.calls.length + ' загружено' : countLabel(group.calls.length) }}</span>
+    <span class="summary-rail" aria-hidden="true"><i></i></span>
+    <span class="summary-copy"><strong>Ход выполнения</strong><span>{{ group.pagination.hasMore ? group.calls.length + ' загружено' : countLabel(group.calls.length) }}</span></span>
     <span class="group-state">{{ groupStateLabel(group.state) }}</span>
+    <span class="summary-chevron" aria-hidden="true"></span>
   </summary>
 
-  <div class="activity-list">
-    @for (tool of group.calls; track tool.toolCallId) {
-      <button
-        type="button"
-        class="activity-row"
-        [attr.data-testid]="'inline-tool-call-' + tool.toolCallId"
-        [attr.data-state]="tool.state"
-        [attr.aria-current]="selectedToolCallId === tool.toolCallId ? 'true' : null"
-        [attr.aria-label]="tool.toolName + ': ' + stateLabel(tool.state)"
-        (click)="select(tool)">
-        <span class="tool-state" aria-hidden="true"></span>
-        <span class="tool-copy">
-          <strong>{{ tool.toolName }}</strong>
-          <span>{{ stateLabel(tool.state) }}</span>
-        </span>
-        @if (duration(tool); as elapsed) {
-          <span class="duration">{{ elapsed }}</span>
+  <ol class="activity-list" aria-label="Операции агента">
+    @for (tool of group.calls; track tool.toolCallId; let position = $index) {
+      <li class="activity-item" [attr.data-state]="tool.state" [class.selected]="selectedToolCallId === tool.toolCallId">
+        <span class="timeline" aria-hidden="true"><i></i></span>
+        <button type="button" class="activity-row"
+          [attr.data-testid]="'inline-tool-call-' + tool.toolCallId"
+          [attr.aria-expanded]="selectedToolCallId === tool.toolCallId"
+          [attr.aria-controls]="'tool-detail-' + tool.toolCallId"
+          [attr.aria-label]="actionKind(tool) + ': ' + actionLabel(tool) + '. ' + stateLabel(tool.state)"
+          (click)="select(tool)">
+          <span class="operation-index">{{ position + 1 }}</span>
+          <span class="tool-copy">
+            <span class="operation-kind">{{ actionKind(tool) }}</span>
+            <strong>{{ actionLabel(tool) }}</strong>
+            <span class="technical-name">{{ toolName(tool) }}</span>
+          </span>
+          <span class="operation-result">
+            <span class="state-label">{{ stateLabel(tool.state) }}</span>
+            @if (duration(tool); as elapsed) { <span class="duration">{{ elapsed }}</span> }
+          </span>
+          <span class="row-chevron" aria-hidden="true"></span>
+        </button>
+
+        @if (selectedToolCallId === tool.toolCallId) {
+          <section class="inline-tool-detail" [id]="'tool-detail-' + tool.toolCallId" data-testid="tool-details" aria-label="Подробности операции">
+            @if (loading && !detailFor(tool)) { <p class="detail-loading" role="status">Читаем подробности операции…</p> }
+            @if (detailFor(tool); as detail) {
+              <div class="detail-sections">
+                <details open><summary><span>Что было передано</span><small>аргументы операции</small></summary><pre>{{ safeContentText(detail.input) }}</pre>
+                  @if (safeContentNote(detail.input)) { <p class="content-note">{{ safeContentNote(detail.input) }}</p> }</details>
+                @if (detail.result) {
+                  <details open><summary><span>Что получилось</span><small>результат инструмента</small></summary><pre>{{ safeContentText(detail.result) }}</pre>
+                    @if (safeContentNote(detail.result)) { <p class="content-note">{{ safeContentNote(detail.result) }}</p> }</details>
+                }
+                @if (detail.outputs.length) {
+                  <details><summary><span>Журнал вывода</span><small>{{ detail.outputs.length }} фрагм.</small></summary>
+                    @for (output of detail.outputs; track output.index) {
+                      <div class="tool-output"><span>{{ output.stream }} · {{ output.observedAt | date:'HH:mm:ss' }}</span><pre>{{ safeContentText(output.content) }}</pre></div>
+                    }
+                    @if (detail.nextOutputCursor) { <button type="button" class="load-output" (click)="loadMoreOutputs.emit()" [disabled]="loading">{{ loading ? 'Загрузка…' : 'Загрузить продолжение' }}</button> }
+                  </details>
+                }
+                <details class="diagnostics"><summary><span>Диагностика</span><small>точные идентификаторы</small></summary><dl>
+                  <dt>Инструмент</dt><dd>{{ detail.toolName }}</dd><dt>Tool call</dt><dd>{{ detail.toolCallId }}</dd>
+                  <dt>Попытка</dt><dd>{{ detail.attemptId }}</dd><dt>Запрос</dt><dd>{{ detail.requestId }}</dd>
+                </dl></details>
+              </div>
+            }
+          </section>
         }
-      </button>
+      </li>
     }
-  </div>
+  </ol>
 
   @if (group.pagination.hasMore) {
-    <button
-      type="button"
-      class="load-more"
-      [disabled]="group.pagination.loading"
-      (click)="loadMore.emit(group)">
-      {{ group.pagination.loading ? 'Загрузка…' : 'Показать ещё действия' }}
-    </button>
+    <button type="button" class="load-more" [disabled]="group.pagination.loading" (click)="loadMore.emit(group)">{{ group.pagination.loading ? 'Загрузка…' : 'Показать ещё операции' }}</button>
   }
 </details>
