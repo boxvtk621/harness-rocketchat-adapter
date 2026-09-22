@@ -160,8 +160,7 @@
           class="messages"
           data-testid="messages-scroll"
           tabindex="0"
-          aria-label="Сообщения диалога"
-          (scroll)="onHistoryScroll()">
+          aria-label="Сообщения диалога">
           @if (historyNextCursor()) {
             <button
               type="button"
@@ -246,12 +245,6 @@
           }
         </div>
 
-        @if (newMessageCount()) {
-          <button type="button" class="new-messages" (click)="revealNewMessages()">
-            Новые сообщения: {{ newMessageCount() }}
-          </button>
-        }
-
         <div class="composer">
           <label for="message-input">Сообщение</label>
           <textarea
@@ -261,9 +254,9 @@
             maxlength="16000"
             [(ngModel)]="draft"
             (keydown)="onDraftKeydown($event)"
-            placeholder="Введите сообщение. Ctrl/Cmd+Enter — отправить"></textarea>
+            placeholder="Введите сообщение. Enter — отправить, Shift+Enter — новая строка"></textarea>
           <div class="composer-foot">
-            <span class="format-hint">Ответ Harness поддерживает Markdown; ваш текст отправляется без преобразования.</span>
+            <span class="format-hint">Enter — отправить · Shift+Enter — новая строка · ответ Harness поддерживает Markdown.</span>
             <span [class.error-text]="draft.length > 16000">{{ draft.length.toLocaleString('ru-RU') }} / 16 000</span>
             <button
               type="button"
@@ -307,90 +300,47 @@
       @if (!selectedDialog()) {
         <div class="empty compact-empty"><span>Сначала выберите диалог.</span></div>
       } @else {
-        <section class="context-section">
-          <h4>Запросы <span>{{ requests().length }}</span></h4>
-          @if (!requests().length && !historyLoading()) {
-            <p class="context-empty">Запросов пока нет.</p>
-          }
-          <div class="context-list">
-            @for (request of requests(); track request.requestId) {
-              <button
-                type="button"
-                [class.selected]="selectedRequestId() === request.requestId"
-                (click)="selectRequest(request)">
-                <span>
-                  <strong>#{{ request.queueSequence }}</strong>
-                  <small class="mono">{{ shortId(request.requestId) }}</small>
-                </span>
-                <span class="status" [class]="'status ' + stateClass(request.status)">{{ requestStatusLabel(request.status) }}</span>
-              </button>
-            }
+        <section class="execution-nav">
+          <div class="execution-selects">
+            <label><span><ui-icon name="request" />Запрос</span>
+              <select data-testid="request-select" [ngModel]="selectedRequestId()" (ngModelChange)="selectRequestById($event)" [disabled]="!requests().length">
+                @for (request of requests(); track request.requestId) { <option [value]="request.requestId">#{{ request.queueSequence }} · {{ requestStatusLabel(request.status) }}</option> }
+              </select>
+            </label>
+            <label><span><ui-icon name="attempt" />Попытка</span>
+              <select [ngModel]="selectedAttemptId()" (ngModelChange)="selectAttemptById($event)" [disabled]="!attempts().length">
+                @for (attempt of attempts(); track attempt.attemptId) { <option [value]="attempt.attemptId">{{ attempt.generation }} · {{ requestStatusLabel(attempt.state) }}</option> }
+              </select>
+            </label>
           </div>
-          @if (requestNextCursor()) {
-            <button type="button" class="context-more" (click)="loadMoreRequests()" [disabled]="contextLoading()">Ещё запросы</button>
-          }
+          @if (!requests().length && !historyLoading()) { <p class="context-empty">Запросов пока нет.</p> }
+          @if (contextLoading()) { <p class="context-empty">Обновление контекста…</p> }
+          <div class="execution-more">
+            @if (requestNextCursor()) { <button type="button" class="context-more" (click)="loadMoreRequests()" [disabled]="requestMoreLoading()">{{ requestMoreLoading() ? 'Загрузка…' : 'Ещё запросы' }}</button> }
+            @if (attemptNextCursor()) { <button type="button" class="context-more" (click)="loadMoreAttempts()" [disabled]="contextLoading()">Ещё попытки</button> }
+          </div>
         </section>
-
-        @if (selectedRequest()) {
-          <section class="context-section">
-            <h4>Попытки <span>{{ attempts().length }}</span></h4>
-            @if (contextLoading()) { <p class="context-empty">Загрузка попыток…</p> }
-            <div class="context-list">
-              @for (attempt of attempts(); track attempt.attemptId) {
-                <button
-                  type="button"
-                  [class.selected]="selectedAttemptId() === attempt.attemptId"
-                  (click)="selectAttempt(attempt)">
-                  <span>
-                    <strong>Попытка {{ attempt.generation }}</strong>
-                    <small>{{ attempt.startedAt ? formatTime(attempt.startedAt) : 'Ещё не начата' }}</small>
-                  </span>
-                  <span class="status" [class]="'status ' + stateClass(attempt.state)">{{ requestStatusLabel(attempt.state) }}</span>
-                </button>
-              }
-            </div>
-            @if (attemptNextCursor()) {
-              <button type="button" class="context-more" (click)="loadMoreAttempts()" [disabled]="contextLoading()">Ещё попытки</button>
-            }
-          </section>
-        }
 
         @if (selectedAttempt()) {
           <section class="context-section tools-section">
-            <h4>Инструменты <span>{{ toolCalls().length }}</span></h4>
-            @if (toolLoading() && !toolCalls().length) { <p class="context-empty">Загрузка инструментов…</p> }
-            @if (!toolLoading() && !toolCalls().length) { <p class="context-empty">Вызовов инструментов нет.</p> }
-            <div class="tool-list">
+            <h4><span class="heading-with-icon"><ui-icon name="tool" />Действия</span><span>{{ toolCalls().length }}</span></h4>
+            @if (toolLoading() && !toolCalls().length) { <p class="context-empty">Загрузка действий…</p> }
+            @if (!toolLoading() && !toolCalls().length) { <p class="context-empty">Действий нет.</p> }
+            <div class="tool-list compact-tools">
               @for (tool of toolCalls(); track tool.toolCallId) {
-                <button
-                  type="button"
-                  [class.selected]="selectedToolCallId() === tool.toolCallId"
-                  [attr.data-testid]="'tool-call-' + tool.toolCallId"
-                  (click)="selectToolCall(tool)">
-                  <span>
-                    <strong>{{ tool.toolName }}</strong>
-                    <small>{{ toolTimingLabel(tool) }}</small>
-                  </span>
+                <button type="button" [class.selected]="selectedToolCallId() === tool.toolCallId" [attr.data-testid]="'tool-call-' + tool.toolCallId" (click)="selectToolCall(tool)">
+                  <ui-icon name="tool" />
+                  <span><strong>{{ selectedToolActionLabel(tool) }}</strong><small>{{ toolTimingLabel(tool) }}</small></span>
                   <span class="status" [class]="'status ' + stateClass(tool.state)">{{ requestStatusLabel(tool.state) }}</span>
                 </button>
               }
             </div>
-            @if (toolNextCursor()) {
-              <button type="button" class="context-more" (click)="loadMoreToolCalls()" [disabled]="toolLoading()">Ещё вызовы</button>
-            }
+            @if (toolNextCursor()) { <button type="button" class="context-more" (click)="loadMoreToolCalls()" [disabled]="toolLoading()">Ещё действия</button> }
           </section>
         }
 
         @if (toolDetail(); as detail) {
           <section class="tool-details" data-testid="tool-details">
-            <header>
-              <div>
-                <span class="section-label">Вызов инструмента</span>
-                <h4>{{ detail.toolName }}</h4>
-                <small class="tool-timing">{{ toolTimingLabel(detail) }}</small>
-              </div>
-              <span class="status" [class]="'status ' + stateClass(detail.state)">{{ requestStatusLabel(detail.state) }}</span>
-            </header>
             <details open>
               <summary>Аргументы</summary>
               <pre>{{ safeContentText(detail.input) }}</pre>
@@ -417,6 +367,7 @@
                 }
               </details>
             }
+            <details class="tool-diagnostics"><summary>Диагностика</summary><dl><dt>Инструмент</dt><dd class="mono">{{ detail.toolName }}</dd><dt>Tool call ID</dt><dd class="mono">{{ detail.toolCallId }}</dd><dt>Attempt ID</dt><dd class="mono">{{ selectedAttemptId() }}</dd><dt>Request ID</dt><dd class="mono">{{ selectedRequestId() }}</dd></dl></details>
           </section>
         }
       }

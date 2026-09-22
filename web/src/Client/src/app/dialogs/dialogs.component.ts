@@ -1,7 +1,6 @@
 import { CommonModule } from '@angular/common';
 import { HttpClient, HttpErrorResponse, HttpHeaders, HttpParams } from '@angular/common/http';
 import {
-  AfterViewInit,
   Component,
   ElementRef,
   EventEmitter,
@@ -40,6 +39,7 @@ import { MarkdownRendererComponent } from '../markdown/markdown-renderer.compone
 import { ToolActivityComponent } from './tool-activity.component';
 import { ToolActivityGroup, ToolActivityPage, ToolActivitySelection } from './tool-activity.models';
 import { buildToolActivityGroups, dedupeToolCalls } from './tool-activity';
+import { UiIconComponent } from '../ui-icon.component';
 
 interface NodeReadContext {
   connectionId: string;
@@ -70,15 +70,16 @@ const MESSAGE_LIMIT = 16_000;
 @Component({
   selector: 'app-dialogs',
   standalone: true,
-  imports: [CommonModule, FormsModule, MarkdownRendererComponent, ToolActivityComponent],
+  imports: [CommonModule, FormsModule, MarkdownRendererComponent, ToolActivityComponent, UiIconComponent],
   templateUrl: './dialogs.component.html',
   styleUrl: './dialogs.component.css'
 })
-export class DialogsComponent implements OnChanges, OnDestroy, AfterViewInit {
+export class DialogsComponent implements OnChanges, OnDestroy {
   @Input({ required: true }) accessToken = '';
   @Input({ required: true }) sessionKey = '';
   @Input({ required: true }) nodes: DialogNodeProjection[] = [];
   @Input() refreshVersion = 0;
+  @Input() navigationTarget: { connectionId: string; nodeId: string; dialogId: string; requestId: string | null; nonce: number } | null = null;
 
   @Output() readonly settingsRequested = new EventEmitter<string>();
   @Output() readonly sessionExpired = new EventEmitter<void>();
@@ -98,6 +99,7 @@ export class DialogsComponent implements OnChanges, OnDestroy, AfterViewInit {
   readonly listLoading = signal(false);
   readonly historyLoading = signal(false);
   readonly contextLoading = signal(false);
+  readonly requestMoreLoading = signal(false);
   readonly toolLoading = signal(false);
   readonly sending = signal(false);
   readonly creating = signal(false);
@@ -113,7 +115,6 @@ export class DialogsComponent implements OnChanges, OnDestroy, AfterViewInit {
   readonly toolNextCursor = signal<string | null>(null);
   readonly historyLoadingOlder = signal(false);
   readonly listMoreLoading = signal(false);
-  readonly newMessageCount = signal(0);
   readonly pendingCommands = signal<PendingCommand[]>([]);
   readonly reconcilingCommandId = signal<string | null>(null);
   readonly snapshots = signal<Record<string, HarnessSnapshot>>({});
@@ -138,8 +139,12 @@ export class DialogsComponent implements OnChanges, OnDestroy, AfterViewInit {
   private requestGeneration = 0;
   private toolGeneration = 0;
   private refreshTimer?: number;
-  private userAtHistoryEnd = true;
   private historyCursorInitialized = false;
+  private historyAutoScrollArmed = false;
+  private historyScrollFrame?: number;
+  private historySettleFrame?: number;
+  private appliedNavigationNonce = 0;
+  private applyingNavigationNonce = 0;
   private lastSessionKey = '';
   private activityGeneration = 0;
   private readonly activityQueued = new Set<string>();
@@ -150,10 +155,6 @@ export class DialogsComponent implements OnChanges, OnDestroy, AfterViewInit {
   private static readonly ACTIVITY_CONCURRENCY = 4;
 
   constructor(private readonly http: HttpClient) {}
-
-  ngAfterViewInit(): void {
-    this.userAtHistoryEnd = true;
-  }
 
   ngOnChanges(changes: SimpleChanges): void {
     if (changes['sessionKey'] || changes['accessToken']) {
@@ -169,10 +170,12 @@ export class DialogsComponent implements OnChanges, OnDestroy, AfterViewInit {
       void this.loadDialogs(false);
     }
     if (changes['refreshVersion'] && !changes['refreshVersion'].firstChange) this.scheduleInvalidationReadback();
+    if (changes['navigationTarget'] && this.navigationTarget) void this.applyNavigationTarget();
   }
 
   ngOnDestroy(): void {
     if (this.refreshTimer) window.clearTimeout(this.refreshTimer);
+    this.cancelPendingHistoryScroll();
   }
 
   selectedDialog(): DialogListRow | null {
@@ -251,7 +254,8 @@ export class DialogsComponent implements OnChanges, OnDestroy, AfterViewInit {
     this.listLoading.set(false);
     this.freshnessAt.set(new Date().toISOString());
 
-    if (preserveSelection && this.selectedDialog()) void this.refreshSelectedDialog(true);
+    if (this.navigationTarget && this.navigationTarget.nonce !== this.appliedNavigationNonce) void this.applyNavigationTarget();
+    else if (preserveSelection && this.selectedDialog()) void this.refreshSelectedDialog(true);
     else if (!this.selectedDialog() && this.dialogs().length) void this.selectDialog(this.dialogs()[0]);
     this.restorePendingCommands();
   }
@@ -321,8 +325,6 @@ export class DialogsComponent implements OnChanges, OnDestroy, AfterViewInit {
     this.historyError.set('');
     this.contextError.set('');
     this.actionError.set('');
-    this.newMessageCount.set(0);
-    this.userAtHistoryEnd = true;
     await this.refreshSelectedDialog(false);
   }
 
@@ -332,8 +334,6 @@ export class DialogsComponent implements OnChanges, OnDestroy, AfterViewInit {
     const generation = ++this.selectionGeneration;
     this.historyLoading.set(true);
     this.historyError.set('');
-    const wasAtEnd = this.isAtHistoryEnd();
-
     try {
       const [historyPage, requestPage] = await Promise.all([
         this.get<HarnessPage<HarnessMessage>>(this.dialogRoute(dialog, `dialogs/${encodeURIComponent(dialog.dialogId)}/history`), dialog.configEpoch, {
@@ -347,13 +347,13 @@ export class DialogsComponent implements OnChanges, OnDestroy, AfterViewInit {
       ]);
       if (generation !== this.selectionGeneration || this.selectedDialogId() !== this.dialogKey(dialog)) return;
       const previousMessages = this.messages();
-      const beforeIds = new Set(previousMessages.map(message => message.messageId));
       const nextMessages = merge ? this.mergeMessages(previousMessages, historyPage.items) : this.sortMessages(historyPage.items);
-      const newCount = historyPage.items.filter(message => !beforeIds.has(message.messageId)).length;
+      const renderedHistoryChanged = !merge || this.renderedHistoryChanged(previousMessages, nextMessages);
       const currentMaxSequence = previousMessages.reduce((maximum, message) => Math.max(maximum, message.sequence), 0);
       const freshMinSequence = historyPage.items.reduce((minimum, message) => Math.min(minimum, message.sequence), Number.MAX_SAFE_INTEGER);
       this.messages.set(nextMessages);
       this.requests.set(requestPage.items);
+      if (renderedHistoryChanged) this.armHistoryAutoScroll();
       this.queueVisibleActivities(nextMessages, dialog, merge);
       const freshPageStartsAfterGap = merge
         && currentMaxSequence > 0
@@ -373,10 +373,7 @@ export class DialogsComponent implements OnChanges, OnDestroy, AfterViewInit {
         if (selected) void this.selectRequest(selected, true);
       }
 
-      window.setTimeout(() => {
-        if (wasAtEnd) this.scrollHistoryToEnd();
-        else if (newCount) this.newMessageCount.update(count => count + newCount);
-      });
+      if (renderedHistoryChanged) this.scheduleHistoryScrollToEnd();
     } catch (error) {
       if (generation !== this.selectionGeneration) return;
       this.historyLoading.set(false);
@@ -389,6 +386,7 @@ export class DialogsComponent implements OnChanges, OnDestroy, AfterViewInit {
     const cursor = this.historyNextCursor();
     const viewport = this.historyViewport?.nativeElement;
     if (!dialog || !cursor || this.historyLoadingOlder()) return;
+    this.disarmHistoryAutoScroll();
     const oldHeight = viewport?.scrollHeight ?? 0;
     const oldTop = viewport?.scrollTop ?? 0;
     this.historyLoadingOlder.set(true);
@@ -417,9 +415,9 @@ export class DialogsComponent implements OnChanges, OnDestroy, AfterViewInit {
   async loadMoreRequests(): Promise<void> {
     const dialog = this.selectedDialog();
     const cursor = this.requestNextCursor();
-    if (!dialog || !cursor || this.contextLoading()) return;
+    if (!dialog || !cursor || this.requestMoreLoading()) return;
     const generation = this.selectionGeneration;
-    this.contextLoading.set(true);
+    this.requestMoreLoading.set(true);
     try {
       const page = await this.get<HarnessPage<HarnessRequest>>(this.dialogRoute(dialog, 'requests'), dialog.configEpoch, {
         dialogId: dialog.dialogId,
@@ -434,7 +432,7 @@ export class DialogsComponent implements OnChanges, OnDestroy, AfterViewInit {
     } catch (error) {
       if (generation === this.selectionGeneration) this.contextError.set(this.failure(error).message);
     } finally {
-      if (generation === this.selectionGeneration) this.contextLoading.set(false);
+      this.requestMoreLoading.set(false);
     }
   }
 
@@ -468,6 +466,11 @@ export class DialogsComponent implements OnChanges, OnDestroy, AfterViewInit {
       this.contextLoading.set(false);
       this.contextError.set(this.failure(error).message);
     }
+  }
+
+  selectRequestById(requestId: string): void {
+    const request = this.requests().find(item => item.requestId === requestId);
+    if (request) void this.selectRequest(request);
   }
 
   async loadMoreAttempts(): Promise<void> {
@@ -529,6 +532,11 @@ export class DialogsComponent implements OnChanges, OnDestroy, AfterViewInit {
       this.toolLoading.set(false);
       this.contextError.set(this.failure(error).message);
     }
+  }
+
+  selectAttemptById(attemptId: string): void {
+    const attempt = this.attempts().find(item => item.attemptId === attemptId);
+    if (attempt) void this.selectAttempt(attempt);
   }
 
   async loadMoreToolCalls(): Promise<void> {
@@ -738,6 +746,8 @@ export class DialogsComponent implements OnChanges, OnDestroy, AfterViewInit {
       this.actionError.set('Не удалось безопасно сохранить идентификатор команды в этой Web-сессии. Сообщение не отправлено.');
       return;
     }
+    this.armHistoryAutoScroll();
+    this.scheduleHistoryScrollToEnd();
 
     try {
       const receipt = await this.post<CommandReceipt>(this.dialogRoute(dialog, 'commands'), dialog.configEpoch, body, identity);
@@ -752,14 +762,14 @@ export class DialogsComponent implements OnChanges, OnDestroy, AfterViewInit {
       await this.handleCommandFailure(pending, error);
     } finally {
       this.sending.set(false);
+      this.scheduleHistoryScrollToEnd();
     }
   }
 
   onDraftKeydown(event: KeyboardEvent): void {
-    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
-      event.preventDefault();
-      void this.sendMessage();
-    }
+    if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return;
+    event.preventDefault();
+    void this.sendMessage();
   }
 
   async reconcilePending(pending: PendingCommand): Promise<void> {
@@ -926,10 +936,12 @@ export class DialogsComponent implements OnChanges, OnDestroy, AfterViewInit {
           loading: false
         }
       ]);
+      this.scheduleHistoryScrollToEnd();
     } catch (error) {
       if (generation !== this.activityGeneration) return;
       this.activityPages.update(pages => pages.map(item => item.attempt.attemptId === group.attemptId ? { ...item, loading: false } : item));
       this.activityErrors.update(errors => ({ ...errors, [group.attemptId]: this.failure(error).message }));
+      this.scheduleHistoryScrollToEnd();
     }
   }
 
@@ -960,14 +972,33 @@ export class DialogsComponent implements OnChanges, OnDestroy, AfterViewInit {
     return `${startLabel}–${this.formatTime(tool.finishedAt)} · ${this.durationLabel(duration)}`;
   }
 
-  onHistoryScroll(): void {
-    this.userAtHistoryEnd = this.isAtHistoryEnd();
-    if (this.userAtHistoryEnd) this.newMessageCount.set(0);
+  toolActionLabel(tool: ToolCallSummary | ToolCallDetail): string {
+    if ('input' in tool && tool.input?.kind === 'inline') {
+      const source = tool.input.content.trim();
+      try {
+        const parsed = JSON.parse(source) as Record<string, unknown>;
+        const command = typeof parsed['command'] === 'string' ? parsed['command'].trim() : '';
+        const path = typeof parsed['path'] === 'string' ? parsed['path'].trim() : '';
+        if (command) return command;
+        if (path) return path;
+      } catch {
+        const command = source.match(/(?:Команда|command)\s*:\s*([^\r\n]+)/i)?.[1]?.trim();
+        if (command) return command;
+      }
+    }
+    const friendly: Record<string, string> = {
+      'cursor.command': 'Команда',
+      'shell.command': 'Команда',
+      'read_file': 'Чтение файла',
+      'write_file': 'Запись файла',
+      'list_files': 'Список файлов'
+    };
+    return friendly[tool.toolName] ?? tool.toolName.replace(/[._-]+/g, ' ');
   }
 
-  revealNewMessages(): void {
-    this.scrollHistoryToEnd();
-    this.newMessageCount.set(0);
+  selectedToolActionLabel(tool: ToolCallSummary): string {
+    const detail = this.toolDetail();
+    return detail?.toolCallId === tool.toolCallId ? this.toolActionLabel(detail) : this.toolActionLabel(tool);
   }
 
   openSettings(connectionId: string): void {
@@ -1352,15 +1383,21 @@ export class DialogsComponent implements OnChanges, OnDestroy, AfterViewInit {
         nextCursor: page.nextCursor,
         loading: false
       };
+      const previous = this.activityPages().find(item => item.attempt.attemptId === attemptId);
+      const renderedActivityChanged = !previous || this.activityRenderKey(previous) !== this.activityRenderKey(next);
       this.activityPages.update(pages => [...pages.filter(item => item.attempt.attemptId !== attemptId), next]);
       this.activityErrors.update(errors => {
         const { [attemptId]: _removed, ...rest } = errors;
         return rest;
       });
       this.activityLoaded.add(attemptId);
+      if (renderedActivityChanged) this.scheduleHistoryScrollToEnd();
     } catch (error) {
       if (generation !== this.activityGeneration || this.selectedDialogId() !== this.dialogKey(dialog)) return;
-      this.activityErrors.update(errors => ({ ...errors, [attemptId]: this.failure(error).message }));
+      const message = this.failure(error).message;
+      const changed = this.activityErrors()[attemptId] !== message;
+      this.activityErrors.update(errors => ({ ...errors, [attemptId]: message }));
+      if (changed) this.scheduleHistoryScrollToEnd();
     }
   }
 
@@ -1448,16 +1485,97 @@ export class DialogsComponent implements OnChanges, OnDestroy, AfterViewInit {
     return remainingSeconds ? `${minutes} мин ${remainingSeconds} с` : `${minutes} мин`;
   }
 
-  private isAtHistoryEnd(): boolean {
-    const element = this.historyViewport?.nativeElement;
-    if (!element) return this.userAtHistoryEnd;
-    return element.scrollHeight - element.scrollTop - element.clientHeight < 40;
+  private async applyNavigationTarget(): Promise<void> {
+    const target = this.navigationTarget;
+    if (!target || target.nonce === this.appliedNavigationNonce || target.nonce === this.applyingNavigationNonce) return;
+    this.applyingNavigationNonce = target.nonce;
+    try {
+      let dialog = this.dialogs().find(item => item.connectionId === target.connectionId
+        && item.nodeId === target.nodeId
+        && item.dialogId === target.dialogId);
+      while (!dialog && this.hasMoreDialogs() && this.navigationTarget?.nonce === target.nonce) {
+        const before = this.dialogCursorSignature();
+        await this.loadMoreDialogs();
+        dialog = this.dialogs().find(item => item.connectionId === target.connectionId
+          && item.nodeId === target.nodeId
+          && item.dialogId === target.dialogId);
+        if (before === this.dialogCursorSignature()) break;
+      }
+      if (!dialog || this.navigationTarget?.nonce !== target.nonce) return;
+
+      if (this.selectedDialogId() !== this.dialogKey(dialog)) await this.selectDialog(dialog);
+      else if (!this.messages().length) await this.refreshSelectedDialog(false);
+      if (!target.requestId) {
+        this.appliedNavigationNonce = target.nonce;
+        return;
+      }
+
+      let request = this.requests().find(item => item.requestId === target.requestId);
+      while (!request && this.requestNextCursor() && this.navigationTarget?.nonce === target.nonce) {
+        const before = this.requestNextCursor();
+        await this.loadMoreRequests();
+        request = this.requests().find(item => item.requestId === target.requestId);
+        if (before === this.requestNextCursor()) break;
+      }
+      if (!request || this.navigationTarget?.nonce !== target.nonce) return;
+      await this.selectRequest(request);
+      this.appliedNavigationNonce = target.nonce;
+    } finally {
+      if (this.applyingNavigationNonce === target.nonce) this.applyingNavigationNonce = 0;
+    }
+  }
+
+  private dialogCursorSignature(): string {
+    return JSON.stringify(Object.entries(this.dialogPages)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([connectionId, page]) => [connectionId, page.nextCursor]));
+  }
+
+  private renderedHistoryChanged(previous: HarnessMessage[], next: HarnessMessage[]): boolean {
+    if (previous.length !== next.length) return true;
+    return previous.some((message, index) => this.messageRenderKey(message) !== this.messageRenderKey(next[index]));
+  }
+
+  private messageRenderKey(message: HarnessMessage): string {
+    return JSON.stringify(message);
+  }
+
+  private activityRenderKey(page: ToolActivityPage): string {
+    return JSON.stringify({ attempt: page.attempt, items: page.items, nextCursor: page.nextCursor });
+  }
+
+  private armHistoryAutoScroll(): void {
+    this.historyAutoScrollArmed = true;
+  }
+
+  private disarmHistoryAutoScroll(): void {
+    this.historyAutoScrollArmed = false;
+    this.cancelPendingHistoryScroll();
+  }
+
+  private cancelPendingHistoryScroll(): void {
+    if (this.historyScrollFrame !== undefined) window.cancelAnimationFrame(this.historyScrollFrame);
+    if (this.historySettleFrame !== undefined) window.cancelAnimationFrame(this.historySettleFrame);
+    this.historyScrollFrame = undefined;
+    this.historySettleFrame = undefined;
+  }
+
+  private scheduleHistoryScrollToEnd(): void {
+    if (!this.historyAutoScrollArmed) return;
+    this.cancelPendingHistoryScroll();
+    this.historyScrollFrame = window.requestAnimationFrame(() => {
+      this.scrollHistoryToEnd();
+      this.historyScrollFrame = undefined;
+      this.historySettleFrame = window.requestAnimationFrame(() => {
+        this.scrollHistoryToEnd();
+        this.historySettleFrame = undefined;
+      });
+    });
   }
 
   private scrollHistoryToEnd(): void {
     const element = this.historyViewport?.nativeElement;
     if (element) element.scrollTop = element.scrollHeight;
-    this.userAtHistoryEnd = true;
   }
 
   private dialogKey(dialog: Pick<DialogListRow, 'nodeId' | 'dialogId'>): string {

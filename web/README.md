@@ -20,7 +20,7 @@ The proposed bootstrap boundary is narrow: application/business settings are ent
 ./scripts/bootstrap.ps1 -ProjectName hl305-my-session -ClientPort 18505 -KeycloakPort 18585 -Start
 ```
 
-Run from this worktree's `web/`. The command creates a dedicated local acceptance environment and fresh infrastructure secrets under the ignored `.runtime/` directory. It never copies the working stack's secrets. Open <http://localhost:18505>, sign in through Keycloak as `operator` using `.runtime/secrets/keycloak_dev_user_password`, then use **Настройки** to register a name, complete HTTPS URI and observation interval, timeout and stale threshold. Bootstrap creates a local test certificate and a deliberately invalid Cursor fixture key; neither is a provider credential. The Harness build contexts are read from existing sibling repositories (or explicit `-CursorContext` / `-CodexContext` paths).
+Run from this worktree's `web/`. The command creates a dedicated local acceptance environment and fresh infrastructure secrets under the ignored `.runtime/` directory. It never copies the working stack's secrets. Open <http://localhost:18505>, sign in through Keycloak as `operator` using `.runtime/secrets/keycloak_dev_user_password`, then use **Ноды** to register a name, complete HTTPS URI and observation interval, timeout and stale threshold. Connection editing, observation diagnostics and provider authorization intentionally share this single section. Bootstrap creates a local test certificate and a deliberately invalid Cursor fixture key; neither is a provider credential. The Harness build contexts are read from existing sibling repositories (or explicit `-CursorContext` / `-CodexContext` paths).
 
 ## Build, test, inspect, stop and restart
 
@@ -41,7 +41,7 @@ docker compose --env-file .runtime/acceptance.env start
 
 The SPA uses Authorization Code + PKCE as a public client and stores the short-lived session in `sessionStorage`. Gateway validates Keycloak JWT issuer, audience, lifetime and signature. Gateway creates a five-minute Centrifugo client token after authenticated API access. The Adapter alone holds the Centrifugo publish API key; the browser never receives it. A publish failure is logged after persistence and does not roll back or repeat the database write.
 
-The local realm has one minimal development user and is not a final team-role model. Session expiry returns 401, and the client requires a fresh sign-in. Centrifugo publications and reconnects refetch the visible Nodes, Work, History or Settings projection; missed publications are acceptable because API/MongoDB remain authoritative.
+The local realm has one minimal development user and is not a final team-role model. The public PKCE SPA renews short-lived access tokens with its OIDC refresh session, coordinates concurrent renewals, updates API/dialog/provider-auth/realtime consumers, and retries bounded temporary IdP/network failures. An expired or revoked refresh session requires a fresh sign-in; access-token TTL is not extended to hide renewal defects. Centrifugo publications and reconnects refetch the visible Nodes, Work or History projection; missed publications are acceptable because API/MongoDB remain authoritative.
 
 ## Fixed versions and resource budget
 

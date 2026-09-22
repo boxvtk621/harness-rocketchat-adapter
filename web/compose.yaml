@@ -200,7 +200,7 @@ services:
       ACCEPTANCE_ISOLATED: ${ACCEPTANCE_ISOLATED:-false}
       COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-hl304}
       ACCEPTANCE_PROJECT_NAMESPACE: ${COMPOSE_PROJECT_NAME:-hl304}
-    secrets: [keycloak_dev_user_password, keycloak_dev_viewer_password]
+    secrets: [keycloak_admin_password, keycloak_dev_user_password, keycloak_dev_viewer_password]
     configs:
       - source: harness_server_cert
         target: /run/config/harness_server_cert

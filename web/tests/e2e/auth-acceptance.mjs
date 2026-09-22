@@ -52,9 +52,9 @@ async function control(status, operationId) {
     req.on('error', reject); req.end(JSON.stringify({ status, operationId }));
   });
 }
-async function select(page, id, section = 'settings') {
+async function select(page, id, section = 'nodes') {
   await page.getByTestId('nav-' + section).click();
-  await page.getByTestId((section === 'settings' ? 'connection-row-' : 'node-row-') + id).getByRole('button').click();
+  await page.getByTestId('node-row-' + id).getByRole('button').click();
   await page.getByTestId('provider-auth-state').waitFor();
 }
 const evidence = { type: 'controlled-provider-through-real-Adapter-Gateway-Keycloak', realProviderLogin: false, checks: [] };

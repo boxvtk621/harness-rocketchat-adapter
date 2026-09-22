@@ -7,6 +7,8 @@ import { User, UserManager, WebStorageStateStore } from 'oidc-client-ts';
 import { runtimeConfig } from './runtime-config';
 import { DialogsComponent } from './dialogs/dialogs.component';
 import { ProviderAuthComponent } from './provider-auth.component';
+import { MarkdownRendererComponent } from './markdown/markdown-renderer.component';
+import { UiIconComponent } from './ui-icon.component';
 
 interface Observation {
   attemptedAt: string | null;
@@ -96,9 +98,12 @@ interface MessageProjection {
   messageId: string;
   role: string;
   sequence: number;
+  version?: number;
   createdAt: string;
   text: string | null;
   content: unknown;
+  requestId?: string | null;
+  attemptId?: string | null;
 }
 
 interface CompletedRequestProjection {
@@ -148,14 +153,27 @@ interface HistoryRow {
   messages: MessageProjection[];
 }
 
-type Section = 'work' | 'history' | 'nodes' | 'settings' | 'dialogs';
+interface ManagedNodeRow {
+  connection: Connection;
+  projection: NodeProjection | null;
+}
+
+interface DialogNavigationTarget {
+  connectionId: string;
+  nodeId: string;
+  dialogId: string;
+  requestId: string | null;
+  nonce: number;
+}
+
+type Section = 'work' | 'history' | 'nodes' | 'dialogs';
 type Resource = 'connections' | 'nodes' | 'work' | 'history';
 type RefreshTarget = Resource | 'dialogs';
 
 @Component({
   selector: 'app-root',
   standalone: true,
-  imports: [CommonModule, FormsModule, DialogsComponent, ProviderAuthComponent],
+  imports: [CommonModule, FormsModule, DialogsComponent, ProviderAuthComponent, MarkdownRendererComponent, UiIconComponent],
   templateUrl: './app.component.html'
 })
 export class AppComponent implements OnInit, OnDestroy {
@@ -173,10 +191,12 @@ export class AppComponent implements OnInit, OnDestroy {
   readonly resourceErrors = signal<Record<Resource, string>>({ connections: '', nodes: '', work: '', history: '' });
   readonly saveBusy = signal(false);
   readonly authError = signal('');
+  readonly sessionNotice = signal('');
   readonly clock = signal(Date.now());
   readonly dialogsRefreshVersion = signal(0);
   readonly dialogsOpened = signal(false);
   readonly dialogsSession = signal(sessionStorage.getItem('hl307.web-session') || crypto.randomUUID());
+  readonly dialogNavigationTarget = signal<DialogNavigationTarget | null>(null);
 
   readonly selectedWorkId = signal<string | null>(null);
   readonly selectedHistoryId = signal<string | null>(null);
@@ -198,6 +218,10 @@ export class AppComponent implements OnInit, OnDestroy {
   private refreshTimer?: number;
   private clockTimer?: number;
   private hadRealtimeDisconnect = false;
+  private renewal?: Promise<User | null>;
+  private renewalRetryTimer?: number;
+  private renewalRetryCount = 0;
+  private loggingOut = false;
   private readonly inFlight = new Set<Resource>();
   private readonly pending = new Set<Resource>();
   private readonly queuedResources = new Set<RefreshTarget>();
@@ -209,12 +233,32 @@ export class AppComponent implements OnInit, OnDestroy {
     response_type: 'code',
     scope: 'openid profile',
     userStore: new WebStorageStateStore({ store: sessionStorage }),
-    automaticSilentRenew: false
+    automaticSilentRenew: false,
+    accessTokenExpiringNotificationTimeInSeconds: 1
   });
 
   constructor(private readonly http: HttpClient) {}
 
+  private readonly onUserLoaded = (loaded: User): void => {
+    this.user.set(loaded);
+    this.sessionNotice.set('');
+    this.authError.set('');
+    this.renewalRetryCount = 0;
+    if (this.authReady()) void this.resumeAuthenticatedApp();
+  };
+  private readonly onUserUnloaded = (): void => {
+    if (!this.loggingOut && this.user()) this.expireSession('Сессия Keycloak завершена. Войдите снова.');
+  };
+  private readonly onAccessTokenExpiring = (): void => { void this.renewSession('token-expiring'); };
+  private readonly onAccessTokenExpired = (): void => { void this.renewSession('token-expired'); };
+  private readonly onSilentRenewError = (error: Error): void => { this.handleRenewFailure(error); };
+  private readonly onVisibilityChange = (): void => {
+    if (document.visibilityState === 'visible') void this.ensureFreshSession('foreground');
+  };
+  private readonly onOnline = (): void => { void this.ensureFreshSession('network-restored'); };
+
   async ngOnInit(): Promise<void> {
+    this.registerAuthEvents();
     this.clockTimer = window.setInterval(() => this.clock.set(Date.now()), 1000);
     try {
       if (location.pathname === '/auth/callback') {
@@ -224,19 +268,10 @@ export class AppComponent implements OnInit, OnDestroy {
         history.replaceState({}, '', '/');
       }
       sessionStorage.setItem('hl307.web-session', this.dialogsSession());
-      this.user.set(await this.users.getUser());
-      if (this.user()?.expired) {
-        await this.users.removeUser();
-        this.user.set(null);
-      }
-      if (this.user()) {
-        const session = await this.http.get<{ canManageConnections: boolean }>('/api/session', { headers: this.headers()! }).toPromise();
-        this.canManageConnections.set(session?.canManageConnections === true);
-        this.loadConnections(false);
-        this.loadProjection('nodes', false);
-        this.loadProjection('work');
-        void this.startRealtime();
-      }
+      const stored = await this.users.getUser();
+      this.user.set(stored);
+      if (stored?.expired) await this.renewSession('startup');
+      if (this.user() && !this.user()?.expired) await this.resumeAuthenticatedApp();
     } catch {
       this.authError.set('Не удалось завершить вход. Повторите попытку.');
     } finally {
@@ -247,12 +282,16 @@ export class AppComponent implements OnInit, OnDestroy {
   ngOnDestroy(): void {
     if (this.refreshTimer) window.clearTimeout(this.refreshTimer);
     if (this.clockTimer) window.clearInterval(this.clockTimer);
+    if (this.renewalRetryTimer) window.clearTimeout(this.renewalRetryTimer);
+    this.unregisterAuthEvents();
     this.subscription?.unsubscribe();
     this.centrifuge?.disconnect();
   }
 
   login(): Promise<void> { return this.users.signinRedirect(); }
   logout(): Promise<void> {
+    this.loggingOut = true;
+    if (this.renewalRetryTimer) window.clearTimeout(this.renewalRetryTimer);
     this.clearDialogPending();
     sessionStorage.removeItem('hl307.web-session');
     return this.users.signoutRedirect();
@@ -263,13 +302,18 @@ export class AppComponent implements OnInit, OnDestroy {
     for (const key of Object.keys(sessionStorage)) if (key.startsWith('hl307:pending:')) sessionStorage.removeItem(key);
   }
   dialogSessionExpired(): void {
-    this.authError.set('Сессия истекла. Войдите снова.');
-    this.user.set(null);
+    void this.renewSession('dialogs-401').then(loaded => {
+      if (loaded) this.dialogsRefreshVersion.update(value => value + 1);
+    });
   }
   openDialogSettings(connectionId: string): void {
-    this.open('settings');
+    this.open('nodes');
     const connection = this.connectionFor(connectionId);
-    if (connection) this.selectConnection(connection);
+    if (connection) {
+      this.selectConnection(connection);
+      const projection = this.nodes().find(item => item.connectionId === connectionId);
+      if (projection) this.selectedNodeId.set(projection.connectionId);
+    }
   }
 
   open(section: Section): void {
@@ -281,22 +325,39 @@ export class AppComponent implements OnInit, OnDestroy {
 
   refreshCurrent(): void {
     const section = this.section();
-    if (section === 'settings') this.loadConnections();
-    else if (section === 'dialogs') {
+    if (section === 'dialogs') {
       this.loadProjection('nodes', false);
       this.dialogsRefreshVersion.update(value => value + 1);
     }
-    else this.loadProjection(section);
+    else if (section === 'nodes') {
+      this.loadConnections();
+      this.loadProjection('nodes');
+    } else this.loadProjection(section);
   }
 
   currentResource(): RefreshTarget {
-    const current = this.section();
-    return current === 'settings' ? 'connections' : current;
+    return this.section();
   }
 
   selectWork(item: WorkProjection): void { this.selectedWorkId.set(this.workKey(item)); }
   selectHistory(item: HistoryRow): void { this.selectedHistoryId.set(item.key); }
   selectNode(item: NodeProjection): void { this.selectedNodeId.set(item.connectionId); }
+
+  selectManagedNode(item: ManagedNodeRow): void {
+    this.selectConnection(item.connection);
+    this.selectedNodeId.set(item.connection.id);
+  }
+
+  openHistoryDialog(item: HistoryRow): void {
+    this.dialogNavigationTarget.set({
+      connectionId: item.connectionId,
+      nodeId: item.nodeId,
+      dialogId: item.dialogId,
+      requestId: item.requestId,
+      nonce: Date.now()
+    });
+    this.open('dialogs');
+  }
 
   selectConnection(connection: Connection): void {
     this.selectedConnectionId.set(connection.id);
@@ -372,7 +433,7 @@ export class AppComponent implements OnInit, OnDestroy {
         this.finishLoad('connections');
       },
       error: error => {
-        this.handleHttpError('connections', error);
+        this.handleHttpError('connections', error, undefined, true);
         this.finishLoad('connections');
       }
     });
@@ -413,7 +474,7 @@ export class AppComponent implements OnInit, OnDestroy {
           createdAt: request.createdAt ?? null,
           completedAt: request.completedAt ?? null,
           result: request.result ?? null,
-          messages: request.messages ?? dialog.messages
+          messages: request.messages ?? dialog.messages.filter(message => message.requestId === request.requestId)
         }));
       }
       return [{
@@ -452,9 +513,32 @@ export class AppComponent implements OnInit, OnDestroy {
     });
   }
 
+  managedNodes(): ManagedNodeRow[] {
+    const projections = new Map(this.nodes().map(item => [item.connectionId, item]));
+    return this.connections().map(connection => ({
+      connection,
+      projection: projections.get(connection.id) ?? null
+    }));
+  }
+
+  filteredManagedNodes(): ManagedNodeRow[] {
+    const query = this.nodesQuery.trim().toLocaleLowerCase('ru');
+    return this.managedNodes().filter(item => {
+      const projection = item.projection;
+      const text = [item.connection.name, item.connection.baseUri, projection?.observation.nodeId].join(' ').toLocaleLowerCase('ru');
+      const category = projection ? this.nodeCategory(projection) : this.connectionCategory(item.connection);
+      return (!query || text.includes(query)) && (this.nodesState === 'all' || category === this.nodesState);
+    });
+  }
+
   selectedWork(): WorkProjection | null { return this.work().find(item => this.workKey(item) === this.selectedWorkId()) ?? null; }
   selectedHistory(): HistoryRow | null { return this.historyRows().find(item => item.key === this.selectedHistoryId()) ?? null; }
   selectedNode(): NodeProjection | null { return this.nodes().find(item => item.connectionId === this.selectedNodeId()) ?? null; }
+  selectedManagedNode(): ManagedNodeRow | null {
+    const connection = this.selectedConnection();
+    if (!connection) return null;
+    return { connection, projection: this.nodes().find(item => item.connectionId === connection.id) ?? null };
+  }
   selectedConnection(): Connection | null { return this.connections().find(item => item.id === this.selectedConnectionId()) ?? null; }
 
   workTitle(item: WorkProjection): string { return item.requestTitle ?? item.title ?? item.dialogTitle ?? 'Обращение без названия'; }
@@ -462,6 +546,35 @@ export class AppComponent implements OnInit, OnDestroy {
     if (item.title) return item.title;
     const request = item.messages.find(message => message.role.toLocaleLowerCase('ru') === 'user' && message.text)?.text?.trim();
     return request ? this.truncate(request, 72) : 'Завершённое обращение';
+  }
+  historyExcerpt(item: HistoryRow): string {
+    const answer = this.historyAnswer(item);
+    return this.truncate(answer ?? this.requestText(item), 112);
+  }
+
+  historyAnswer(item: HistoryRow): string | null {
+    if (item.result?.trim()) return item.result.trim();
+    const exact = item.messages
+      .filter(message => message.role.toLocaleLowerCase('ru') === 'assistant')
+      .sort((a, b) => b.sequence - a.sequence)[0];
+    if (!exact) return null;
+    if (exact.text?.trim()) return exact.text.trim();
+    if (typeof exact.content === 'string' && exact.content.trim()) return exact.content.trim();
+    if (exact.content && typeof exact.content === 'object') {
+      const content = exact.content as { kind?: unknown; content?: unknown };
+      if (content.kind === 'inline' && typeof content.content === 'string' && content.content.trim()) return content.content.trim();
+    }
+    return null;
+  }
+
+  historyAnswerIdentity(item: HistoryRow): string {
+    const message = item.messages.filter(candidate => candidate.role.toLocaleLowerCase('ru') === 'assistant').sort((a, b) => b.sequence - a.sequence)[0];
+    return message?.messageId ?? item.key;
+  }
+
+  historyAnswerVersion(item: HistoryRow): number {
+    const message = item.messages.filter(candidate => candidate.role.toLocaleLowerCase('ru') === 'assistant').sort((a, b) => b.sequence - a.sequence)[0];
+    return message?.version ?? 1;
   }
   workNodeName(item: WorkProjection): string { return item.nodeName ?? this.displayNodeName(item.connectionId, item.nodeId); }
   historyNodeName(item: HistoryRow): string { return item.nodeName ?? this.displayNodeName(item.connectionId, item.nodeId); }
@@ -487,6 +600,14 @@ export class AppComponent implements OnInit, OnDestroy {
     if (item.observation.ready === true) return 'ready';
     if (item.observation.ready === false && item.observation.executorHealthy === true) return 'not-ready';
     return 'unknown';
+  }
+  connectionCategory(item: Connection): string {
+    const projection = this.nodes().find(node => node.connectionId === item.id);
+    if (projection) return this.nodeCategory(projection);
+    if (item.identityStatus === 'node_id_conflict') return 'conflict';
+    if (item.observation.availability === 'unavailable' || item.observation.httpReachable === false) return 'offline';
+    if (item.observation.availability === 'stale') return 'stale';
+    return item.observation.attemptedAt ? 'offline' : 'unknown';
   }
 
   statusLabel(status?: string | null, effectStatus?: string | null): string {
@@ -567,9 +688,7 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   resultText(item: HistoryRow): string {
-    if (item.result?.trim()) return item.result.trim();
-    const result = [...item.messages].reverse().find(message => message.role.toLocaleLowerCase('ru') === 'assistant' && message.text?.trim());
-    return result?.text?.trim() ?? 'Текст результата не предоставлен.';
+    return this.historyAnswer(item) ?? 'Ответ отсутствует в публичной проекции для этого обращения.';
   }
 
   requestText(item: HistoryRow): string {
@@ -598,7 +717,7 @@ export class AppComponent implements OnInit, OnDestroy {
         this.finishLoad(kind);
       },
       error: error => {
-        this.handleHttpError(kind, error);
+        this.handleHttpError(kind, error, undefined, true);
         this.finishLoad(kind);
       }
     });
@@ -630,6 +749,118 @@ export class AppComponent implements OnInit, OnDestroy {
     this.resourceErrors.update(current => ({ ...current, [resource]: value }));
   }
 
+  private registerAuthEvents(): void {
+    this.users.events.addUserLoaded(this.onUserLoaded);
+    this.users.events.addUserUnloaded(this.onUserUnloaded);
+    this.users.events.addAccessTokenExpiring(this.onAccessTokenExpiring);
+    this.users.events.addAccessTokenExpired(this.onAccessTokenExpired);
+    this.users.events.addSilentRenewError(this.onSilentRenewError);
+    document.addEventListener('visibilitychange', this.onVisibilityChange);
+    window.addEventListener('online', this.onOnline);
+  }
+
+  private unregisterAuthEvents(): void {
+    this.users.events.removeUserLoaded(this.onUserLoaded);
+    this.users.events.removeUserUnloaded(this.onUserUnloaded);
+    this.users.events.removeAccessTokenExpiring(this.onAccessTokenExpiring);
+    this.users.events.removeAccessTokenExpired(this.onAccessTokenExpired);
+    this.users.events.removeSilentRenewError(this.onSilentRenewError);
+    document.removeEventListener('visibilitychange', this.onVisibilityChange);
+    window.removeEventListener('online', this.onOnline);
+  }
+
+  private async resumeAuthenticatedApp(): Promise<void> {
+    const headers = this.headers();
+    if (!headers) return;
+    try {
+      const session = await this.http.get<{ canManageConnections: boolean }>('/api/session', { headers }).toPromise();
+      this.canManageConnections.set(session?.canManageConnections === true);
+      this.loadConnections(false);
+      this.loadProjection('nodes', false);
+      this.loadProjection(this.section() === 'history' ? 'history' : 'work', false);
+      if (!this.centrifuge) void this.startRealtime();
+      else this.dialogsRefreshVersion.update(value => value + 1);
+    } catch (error) {
+      if (error instanceof HttpErrorResponse && error.status === 401) await this.renewSession('session-401');
+      else this.sessionNotice.set('Сессия сохранена, но сервер временно недоступен. Чтение будет повторено после восстановления связи.');
+    }
+  }
+
+  private async ensureFreshSession(reason: string): Promise<User | null> {
+    const current = this.user() ?? await this.users.getUser();
+    if (!current) return null;
+    const expiresIn = current.expires_in ?? 0;
+    if (!current.expired && expiresIn > 60) return current;
+    return this.renewSession(reason);
+  }
+
+  private renewSession(reason: string): Promise<User | null> {
+    if (this.loggingOut) return Promise.resolve(null);
+    if (this.renewal) return this.renewal;
+    this.sessionNotice.set('Продление сессии…');
+    this.renewal = this.users.signinSilent()
+      .then(loaded => {
+        this.user.set(loaded);
+        this.sessionNotice.set('');
+        this.authError.set('');
+        this.renewalRetryCount = 0;
+        return loaded;
+      })
+      .catch((error: unknown) => {
+        this.handleRenewFailure(error, reason);
+        return null;
+      })
+      .finally(() => { this.renewal = undefined; });
+    return this.renewal;
+  }
+
+  private handleRenewFailure(error: unknown, reason = 'automatic'): void {
+    const text = this.oidcErrorText(error);
+    if (/invalid_grant|login_required|interaction_required|session.*expired|refresh.*expired/i.test(text)) {
+      this.expireSession('Сессия Keycloak завершена или отозвана. Войдите снова.');
+      return;
+    }
+    this.sessionNotice.set('Не удалось продлить сессию из-за временной ошибки сети или Keycloak. Загруженные данные сохранены; повторим автоматически.');
+    if (this.renewalRetryCount >= 3 || this.renewalRetryTimer) return;
+    const delay = 1000 * 2 ** this.renewalRetryCount++;
+    this.renewalRetryTimer = window.setTimeout(() => {
+      this.renewalRetryTimer = undefined;
+      void this.renewSession(`retry:${reason}`);
+    }, delay);
+  }
+
+  private oidcErrorText(error: unknown): string {
+    if (!error || typeof error !== 'object') return String(error ?? '');
+    const value = error as Record<string, unknown>;
+    const direct = ['name', 'message', 'error', 'error_description', 'code']
+      .map(key => value[key])
+      .filter((item): item is string => typeof item === 'string');
+    const cause = value['cause'];
+    return [...direct, cause && cause !== error ? this.oidcErrorText(cause) : ''].filter(Boolean).join(' ');
+  }
+
+  private expireSession(message: string): void {
+    if (this.renewalRetryTimer) window.clearTimeout(this.renewalRetryTimer);
+    this.renewalRetryTimer = undefined;
+    this.subscription?.unsubscribe();
+    this.subscription = undefined;
+    this.centrifuge?.disconnect();
+    this.centrifuge = undefined;
+    this.canManageConnections.set(false);
+    this.sessionNotice.set('');
+    this.authError.set(message);
+    this.user.set(null);
+    void this.users.removeUser();
+  }
+
+  private recoverSafeRead(resource: Resource): void {
+    void this.renewSession(`${resource}-401`).then(loaded => {
+      if (!loaded) return;
+      if (resource === 'connections') this.loadConnections(false);
+      else this.loadProjection(resource, false);
+    });
+  }
+
   private headers(): HttpHeaders | null {
     const token = this.user()?.access_token;
     if (!token) {
@@ -640,10 +871,11 @@ export class AppComponent implements OnInit, OnDestroy {
     return new HttpHeaders({ Authorization: `Bearer ${token}` });
   }
 
-  private handleHttpError(resource: Resource, error: HttpErrorResponse, fallback = 'Не удалось загрузить данные. Сохранён предыдущий снимок.'): void {
+  private handleHttpError(resource: Resource, error: HttpErrorResponse, fallback = 'Не удалось загрузить данные. Сохранён предыдущий снимок.', retrySafeRead = false): void {
     if (error.status === 401) {
-      this.authError.set('Сессия истекла. Войдите снова.');
-      this.user.set(null);
+      if (retrySafeRead) this.recoverSafeRead(resource);
+      else this.sessionNotice.set('Токен устарел во время команды. Сессия будет продлена, но команда не повторяется автоматически. Проверьте её квитанцию.');
+      void this.renewSession(`${resource}-401`);
       return;
     }
     if (error.status === 403) {
@@ -662,6 +894,7 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   private async startRealtime(): Promise<void> {
+    await this.ensureFreshSession('realtime-connect');
     const headers = this.headers();
     if (!headers) return;
     try {
@@ -670,6 +903,7 @@ export class AppComponent implements OnInit, OnDestroy {
       this.centrifuge = new Centrifuge(runtimeConfig.centrifugoWebsocketUrl, {
         token: reply.token,
         getToken: async () => {
+          await this.ensureFreshSession('realtime-refresh');
           const refreshedHeaders = this.headers();
           if (!refreshedHeaders) throw new Error('Session expired.');
           const refreshed = await this.http.get<{ token: string }>('/api/realtime/token', { headers: refreshedHeaders }).toPromise();

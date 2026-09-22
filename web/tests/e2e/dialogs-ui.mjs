@@ -15,16 +15,22 @@ const nodeId = id(1), dialogId = id(2), requestId = id(3), attemptId = id(4), to
 const requestId2 = id(13), attemptId2 = id(14), toolId2 = id(15);
 const retryAttemptId = id(16), retryToolId = id(17);
 const requestId3 = id(23), attemptId3 = id(24), toolId3 = id(25);
+const deepDialogId = id(32), deepRequestId = id(33), deepDecoyRequestId = id(34), deepAttemptId = id(35);
 const now = '2026-09-21T16:00:00Z';
 const safe = (content, truncated = false) => ({ kind: 'inline', content, redaction: 'none', truncated });
 const node = { connectionId: 'fixture', name: 'Тестовый Harness · UI fixture', configEpoch: 1, identityStatus: 'unique', observation: {
   nodeId, ready: true, attemptedAt: now, successfulAt: now, httpReachable: true, executorHealthy: true, heartbeatFresh: true, heartbeatAt: now, bootId: id(9), compatibility: 'compatible', availability: 'available', occupancy: 'idle'
 } };
+const connection = { id: 'fixture', name: node.name, baseUri: 'https://fixture-harness:8443/', configEpoch: 1, observationIntervalSeconds: 15, requestTimeoutSeconds: 5, staleThresholdSeconds: 45, observation: node.observation, createdAt: now, updatedAt: now, identityStatus: 'unique' };
 let dialog = { dialogId, version: 41, title: 'Проверка workspace и инструментов · fixture', createdAt: now, lastActivityAt: now, state: 'active', activeRequestId: requestId3, activeAttemptId: attemptId3 };
 const request = { requestId, dialogId, inputMessageId: id(100), queueSequence: 1, version: 2, status: 'completed' };
 const attempt = { attemptId, dialogId, requestId, generation: 1, version: 2, state: 'completed', effectStatus: 'known', startedAt: now, finishedAt: now };
 const request2 = { requestId: requestId2, dialogId, inputMessageId: id(178), queueSequence: 2, version: 2, status: 'completed' };
 const request3 = { requestId: requestId3, dialogId, inputMessageId: id(180), queueSequence: 3, version: 2, status: 'active' };
+const deepDialog = { dialogId: deepDialogId, version: 2, title: 'Архивный диалог второй страницы', createdAt: now, lastActivityAt: now, state: 'completed', activeRequestId: null, activeAttemptId: null };
+const deepDecoyRequest = { requestId: deepDecoyRequestId, dialogId: deepDialogId, inputMessageId: id(1177), queueSequence: 1, version: 1, status: 'completed' };
+const deepRequest = { requestId: deepRequestId, dialogId: deepDialogId, inputMessageId: id(1178), queueSequence: 2, version: 1, status: 'completed' };
+const deepAttempt = { attemptId: deepAttemptId, dialogId: deepDialogId, requestId: deepRequestId, generation: 1, version: 1, state: 'completed', effectStatus: 'known', startedAt: now, finishedAt: now };
 const attempt2 = { attemptId: attemptId2, dialogId, requestId: requestId2, generation: 2, version: 2, state: 'completed', effectStatus: 'known', startedAt: now, finishedAt: now };
 const retryAttempt = { attemptId: retryAttemptId, dialogId, requestId: requestId2, generation: 1, version: 2, state: 'failed', effectStatus: 'known', startedAt: now, finishedAt: now };
 const attempt3 = { attemptId: attemptId3, dialogId, requestId: requestId3, generation: 3, version: 2, state: 'running', effectStatus: 'known', startedAt: now };
@@ -41,6 +47,10 @@ messages.push(
     content: safe(gfmFixture), finishReason: 'complete' },
   { messageId: id(180), role: 'user', dialogId, sequence: 81, version: 1, createdAt: now, text: 'Текущее обращение ещё выполняется.', disposition: 'applied', commandId: id(380), requestId: requestId3 }
 );
+const deepMessages = [
+  { messageId: id(1178), role: 'user', dialogId: deepDialogId, sequence: 1, version: 1, createdAt: now, text: 'Покажи Markdown и отдельные действия.', disposition: 'applied', commandId: id(1378), requestId: deepRequestId },
+  { messageId: id(1179), role: 'assistant', dialogId: deepDialogId, sequence: 2, version: 1, createdAt: now, attemptId: deepAttemptId, content: safe(gfmFixture), finishReason: 'complete' }
+];
 const summary = { toolCallId: toolId, toolName: 'read_test_file', state: 'succeeded', startedAt: now, finishedAt: now, detailVersion: 3 };
 const failedTool = { toolCallId: id(6), toolName: 'fixture_failure', state: 'failed', startedAt: now, finishedAt: now, detailVersion: 4 };
 const summary2 = { toolCallId: toolId2, toolName: 'render_markdown_fixture', state: 'succeeded', startedAt: now, finishedAt: now, detailVersion: 1 };
@@ -69,6 +79,9 @@ const externalImageRequests = [];
 page.on('pageerror', error => runtimeErrors.push(error.message));
 page.on('request', request => { if (request.url().startsWith('https://example.test/')) externalImageRequests.push(request.url()); });
 await page.route('**/api/projections/nodes', route => route.fulfill({ json: [node] }));
+await page.route('**/api/connections', route => route.fulfill({ json: [connection] }));
+await page.route('**/api/projections/history', route => route.fulfill({ json: [{ connectionId: 'fixture', nodeId, nodeName: node.name, dialogId: deepDialogId, title: 'Проверка Markdown и действий', dialogVersion: 2, createdAt: now, completedAt: now, status: 'completed', completedRequests: [{ requestId: deepRequestId, title: 'Покажи Markdown и отдельные действия.', status: 'completed', createdAt: now, completedAt: now, messages: deepMessages }], messages: [] }] }));
+await page.route('**/api/connections/fixture/provider-auth?*', route => route.fulfill({ json: { schemaId: 'harness-provider-auth-v1', nodeId, revision: 1, state: 'authenticated', checkedAt: now, reasonCode: null, capabilities: { methods: [], canCheck: true, canLogout: true } } }));
 await page.route('**/api/dialogs/**', async route => {
   const url = new URL(route.request().url());
   const path = url.pathname.split(`/nodes/${nodeId}/`)[1];
@@ -76,8 +89,11 @@ await page.route('**/api/dialogs/**', async route => {
   const error = (status, code) => route.fulfill({ status, json: { code } });
   if (path === 'identity') return json({ ...envelope, schemaSHA256: '0'.repeat(64), registryVersion: 1, identityEpoch: 1, adapter: { kind: 'fixture', version: '1' }, capabilities: { chat: 'verified', tool_results: 'verified' } });
   if (path === 'snapshot') return json({ ...envelope, capturedAt: now, completeness: 'complete', node: { transportAvailability: 'online', engineReadiness: node.observation.ready ? 'ready' : 'blocked', occupancy: 'active', queuePaused: false, queueVersion: 1, pendingCount: 0, blockedReasons: node.observation.ready ? [] : ['auth_unavailable'], activeAttemptId: attemptId3 }, pendingQueue: [], activeAttempt: attempt3 });
-  if (path === 'dialogs') return json(pageDto([dialog], 'dialogs', { schemaId: 'dialog-view-v1' }));
+  if (path === 'dialogs') return url.searchParams.has('cursor')
+    ? json(pageDto([deepDialog], 'dialogs', { schemaId: 'dialog-view-v1' }))
+    : json(pageDto([dialog], 'dialogs', { schemaId: 'dialog-view-v1', nextCursor: 'older-dialogs' }));
   if (path === `dialogs/${dialogId}`) return json({ ...envelope, schemaId: 'dialog-view-v1', dialog });
+  if (path === `dialogs/${deepDialogId}`) return json({ ...envelope, schemaId: 'dialog-view-v1', dialog: deepDialog });
   if (path === `dialogs/${dialogId}/history`) {
     historyFetches++;
     if (historyError) return error(503, 'read_unavailable');
@@ -85,16 +101,24 @@ await page.route('**/api/dialogs/**', async route => {
     const start = Math.max(0, end - Number(url.searchParams.get('limit') ?? 30));
     return json(pageDto(messages.slice(start, end), 'history', { dialogId, nextCursor: start ? String(start) : null }));
   }
-  if (path === 'requests') return json(pageDto([request2, request3], 'requests'));
+  if (path === `dialogs/${deepDialogId}/history`) return json(pageDto(deepMessages, 'history', { dialogId: deepDialogId }));
+  if (path === 'requests') {
+    if (url.searchParams.get('dialogId') === deepDialogId) return url.searchParams.has('cursor')
+      ? json(pageDto([deepRequest], 'requests'))
+      : json(pageDto([deepDecoyRequest], 'requests', { nextCursor: 'older-requests' }));
+    return json(pageDto([request2, request3], 'requests'));
+  }
   if (path === 'attempts') {
     const requested = url.searchParams.get('requestId');
-    const selectedAttempts = requested === requestId2 ? [retryAttempt, attempt2] : requested === requestId3 ? [attempt3] : [attempt];
+    if (requested === deepDecoyRequestId) await new Promise(resolve => setTimeout(resolve, 1500));
+    const selectedAttempts = requested === deepRequestId ? [deepAttempt] : requested === requestId2 ? [retryAttempt, attempt2] : requested === requestId3 ? [attempt3] : [attempt];
     return json(pageDto(selectedAttempts, 'attempts', { dialogId, requestId: requested }));
   }
   if (path === `attempts/${attemptId}`) return json({ ...envelope, attempt });
   if (path === `attempts/${attemptId2}`) return json({ ...envelope, attempt: attempt2 });
   if (path === `attempts/${retryAttemptId}`) return json({ ...envelope, attempt: retryAttempt });
   if (path === `attempts/${attemptId3}`) return json({ ...envelope, attempt: attempt3 });
+  if (path === `attempts/${deepAttemptId}`) return json({ ...envelope, attempt: deepAttempt });
   if (path === `attempts/${attemptId}/tool-calls`) return json(pageDto([summary, failedTool], 'tool_calls', { schemaId: 'tool-timeline-v1', dialogId, requestId, attemptId }));
   if (path === `attempts/${attemptId2}/tool-calls`) return json(pageDto([summary2], 'tool_calls', { schemaId: 'tool-timeline-v1', dialogId, requestId: requestId2, attemptId: attemptId2 }));
   if (path === `attempts/${retryAttemptId}/tool-calls`) return json(pageDto([retrySummary], 'tool_calls', { schemaId: 'tool-timeline-v1', dialogId, requestId: requestId2, attemptId: retryAttemptId }));
@@ -142,6 +166,9 @@ try {
   await page.getByTestId(`inline-tool-call-${toolId2}`).waitFor({ state: 'attached' });
   await page.getByTestId(`inline-tool-call-${retryToolId}`).waitFor({ state: 'attached' });
   await page.getByTestId(`inline-tool-call-${toolId3}`).waitFor();
+  const scroller = page.getByTestId('messages-scroll');
+  const assertAtBottom = async label => poll(async () => assert.ok(await scroller.evaluate(el => el.scrollHeight - el.scrollTop - el.clientHeight < 40)), label);
+  await assertAtBottom('Opening a dialog settles at the latest rendered Markdown/activity');
   assert.equal(await page.locator('app-tool-activity').count(), 4, 'Each request/attempt, including a failed retry without an answer, keeps a distinct inline activity group');
   const firstGroup = page.getByTestId(`inline-tool-call-${toolId}`).locator('xpath=ancestor::details');
   await firstGroup.locator('summary').click();
@@ -166,12 +193,16 @@ try {
   assert.equal(await markdownMessage.locator('.markdown-code code').textContent(), codeSource);
   await markdownMessage.locator('.markdown-copy-code').click();
   assert.equal(await page.evaluate(() => navigator.clipboard.readText()), codeSource, 'Copy keeps exact fenced source');
+  await scroller.evaluate(el => { el.style.scrollBehavior = 'auto'; el.scrollTop = 0; });
   messages[79] = { ...messages[79], version: 4, content: safe('Частичная версия\n\n```ts\nconst pending = true;') };
   await page.getByTestId('refresh-current').click();
   await poll(async () => assert.ok((await markdownMessage.innerText()).includes('const pending = true;')), 'Partial fence update renders safely');
+  await assertAtBottom('Updated partial Markdown scrolls to the latest message after render');
+  await scroller.evaluate(el => { el.scrollTop = 0; });
   messages[79] = { ...messages[79], version: 5, content: safe(gfmFixture) };
   await page.getByTestId('refresh-current').click();
   await poll(async () => assert.equal(await markdownMessage.locator('h1').innerText(), 'Проверка GFM'), 'Final message version replaces partial DOM');
+  await assertAtBottom('Final Markdown height settles at the latest message');
   assert.equal(await page.getByTestId(`message-${id(179)}`).count(), 1, 'Message versions do not duplicate DOM');
   await markdownMessage.scrollIntoViewIfNeeded();
   await page.screenshot({ path: join(out, 'hl311-markdown-actions-qhd.png') });
@@ -199,7 +230,6 @@ try {
   historyError = false;
   await page.getByTestId('refresh-current').click();
   await poll(async () => assert.equal(await page.locator('.read-error').count(), 0), 'Read recovery');
-  const scroller = page.getByTestId('messages-scroll');
   await scroller.evaluate(el => { el.scrollTop = 0; });
   const before = await page.locator('article.message').first().getAttribute('data-testid');
   await page.getByTestId('load-older-messages').click();
@@ -216,12 +246,21 @@ try {
   await page.screenshot({ path: join(out, 'dialogs-fixture-qhd.png'), fullPage: true });
   await page.getByTestId('message-input').focus();
   assert.notEqual(await page.getByTestId('message-input').evaluate(el => getComputedStyle(el).outlineStyle), 'none');
-  await page.keyboard.press('Enter');
-  assert.equal(posts, 0, 'Enter adds a line, not a command');
+  await page.getByTestId('message-input').fill('Первая строка');
+  await page.keyboard.press('Shift+Enter');
+  assert.equal(posts, 0, 'Shift+Enter adds a line without a command');
+  assert.equal(await page.getByTestId('message-input').inputValue(), 'Первая строка\n');
+  await page.getByTestId('message-input').evaluate(el => {
+    const event = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'isComposing', { value: true });
+    el.dispatchEvent(event);
+  });
+  assert.equal(posts, 0, 'IME composition Enter never submits');
   await page.getByTestId('message-input').fill('LOST_ACK_fixture_text_must_not_be_in_storage');
-  await page.keyboard.press('Control+Enter');
+  await page.keyboard.press('Enter');
   await page.locator('[data-testid^="pending-command-"]').waitFor();
   assert.equal(posts, 1);
+  await assertAtBottom('Sending scrolls to the latest message without replaying the command');
   const storage = await page.evaluate(() => Object.keys(sessionStorage).filter(k => k.startsWith('hl307:pending:')).map(k => sessionStorage.getItem(k)).join(''));
   assert.ok(!storage.includes('LOST_ACK_fixture_text'));
   assert.ok(!storage.includes('access_token'));
@@ -238,8 +277,13 @@ try {
   for (let i = 0; i < 60; i++) messages.push({ ...messages[0], messageId: id(1000 + i), sequence: messages.length + 1, text: `Позднее сообщение ${i + 1}`, commandId: id(1100 + i) });
   await page.getByTestId('refresh-current').click();
   await page.getByTestId(`message-${id(1059)}`).waitFor();
-  await poll(async () => assert.ok(await page.getByRole('button', { name: /Новые сообщения:/ }).isVisible()), 'New-message indicator without forced scroll');
-  assert.ok(await page.getByTestId('messages-scroll').evaluate(el => el.scrollTop < el.scrollHeight - el.clientHeight - 40));
+  await assertAtBottom('New messages always move the chat to the latest rendered message');
+  await scroller.evaluate(el => { el.scrollTop = 0; });
+  const beforeUnchangedRefresh = historyFetches;
+  await page.getByTestId('refresh-current').click();
+  await poll(async () => assert.ok(historyFetches > beforeUnchangedRefresh), 'Unchanged history refetched');
+  await page.waitForTimeout(250);
+  assert.equal(await scroller.evaluate(el => el.scrollTop), 0, 'Unchanged refetch does not create a scroll loop');
   await page.getByTestId('load-older-messages').click();
   await page.getByTestId(`message-${id(1000)}`).waitFor();
   const messageIds = await page.locator('article.message').evaluateAll(items => items.map(item => item.dataset.testid));
@@ -262,6 +306,36 @@ try {
   await page.setViewportSize({ width: 1440, height: 1000 });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 1440);
   await page.screenshot({ path: join(out, 'dialogs-fixture-laptop.png'), fullPage: true });
+  await page.getByTestId('nav-history').click();
+  const historyRow = page.locator('[data-testid^="history-row-"]').first();
+  await historyRow.waitFor();
+  await historyRow.click();
+  assert.equal(await page.getByTestId('history-table').count(), 0, 'History no longer uses a stretched full-width table');
+  assert.equal(await page.getByTestId('history-inspector').locator('h1').innerText(), 'Проверка GFM', 'Exact request answer renders as readable Markdown');
+  assert.ok((await page.getByTestId('history-inspector').innerText()).includes('Покажи Markdown и отдельные действия.'));
+  await page.setViewportSize({ width: 2560, height: 1440 });
+  await page.screenshot({ path: join(out, 'hl311-followup-history-qhd.png') });
+  await page.setViewportSize({ width: 640, height: 360 });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 640, 'History has no page-level horizontal overflow at an effective 200% zoom viewport');
+  assert.ok(await page.getByRole('button', { name: 'Открыть в диалоге', exact: true }).isVisible(), 'History remains operable at an effective 200% browser zoom viewport');
+  await page.screenshot({ path: join(out, 'hl311-followup-history-200-percent.png'), fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.getByRole('button', { name: 'Открыть в диалоге', exact: true }).click();
+  await page.getByTestId(`message-${id(1179)}`).waitFor();
+  assert.equal(await page.getByTestId('request-select').inputValue(), deepRequestId, 'History deep-link loads and selects the exact request from the second page');
+  assert.equal(await page.getByTestId(`message-${id(1179)}`).count(), 1, 'History deep-link loads the exact dialog from the second page without duplicating its response');
+  await page.getByTestId('nav-nodes').click();
+  assert.equal(await page.getByTestId('nav-settings').count(), 0, 'Duplicating Settings navigation is removed');
+  await page.getByTestId('node-row-fixture').getByRole('button').click();
+  await page.getByTestId('provider-auth').waitFor();
+  assert.equal(await page.getByTestId('provider-auth').count(), 1, 'Provider auth exists once in the unified Nodes inspector');
+  await page.getByTestId('connection-uri').waitFor();
+  await page.setViewportSize({ width: 2560, height: 1440 });
+  await page.screenshot({ path: join(out, 'hl311-followup-nodes-qhd.png') });
+  await page.setViewportSize({ width: 390, height: 844 });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 390);
+  await page.screenshot({ path: join(out, 'hl311-followup-nodes-390.png'), fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 1000 });
   node.observation.ready = false;
   node.observation.engineReadiness = 'blocked';
   node.observation.blockedReasons = ['auth_unavailable'];
@@ -270,6 +344,7 @@ try {
   await page.getByTestId('message-input').waitFor();
   await page.getByTestId('message-input').fill('Недоступная нода не должна принять сообщение');
   assert.ok(await page.getByTestId('send-message').isDisabled());
+  await page.keyboard.press('Enter');
   assert.ok(await page.getByTestId('create-dialog').isDisabled());
   assert.ok(await page.locator('article.message').count() > 0, 'Persisted history remains readable without provider auth');
   assert.ok(await page.getByRole('button', { name: 'Настройки ноды', exact: true }).count() > 0);
@@ -279,8 +354,8 @@ try {
   await page.getByTestId('nav-work').click();
   await poll(async () => assert.equal(await page.locator('app-dialogs').isVisible(), false), 'Hidden dialogs must not leak into other screens');
   assert.deepEqual(runtimeErrors, []);
-  await writeFile(join(out, 'dialogs-ui-evidence.json'), JSON.stringify({ mode: 'controlled public API DTO fixtures; not provider execution', posts, detailFetches, historyFetches, providerCalls: 0, checks: ['four request/attempt-scoped activity groups including failed retry without response', 'live activity before response', 'exact response anchor', 'lazy details', 'older inline detail/output pagination outside current inspector page', 'safe GFM structures', 'partial-to-final message versions without duplicate DOM', 'raw HTML and dangerous URL inert', 'no external Markdown image requests', 'exact fenced-source copy', 'long code/table local overflow', 'retained data/draft', 'older-page anchor', '60-message catch-up and no forced scroll', 'reconnect refetch without command replay', 'blocked auth preserves history', 'tool output continuation', 'keyboard focus', 'pending IDs only', 'reload receipt no replay', 'QHD/390/laptop screenshots'] }, null, 2));
-  console.log('PASS HL-311 controlled DTO fixtures: scoped inline activities, safe/versioned GFM, lazy details, reconnect/scroll retention, security checks and responsive screenshots; zero provider calls.');
+  await writeFile(join(out, 'dialogs-ui-evidence.json'), JSON.stringify({ mode: 'controlled public API DTO fixtures; not provider execution', posts, detailFetches, historyFetches, providerCalls: 0, checks: ['Enter sends exactly once', 'Shift+Enter newline', 'IME Enter is inert', 'disabled composer is inert', 'open/send/new/update/activity-height auto-scroll', 'older-page anchor', 'unchanged refetch has no scroll loop', 'compact request/attempt execution navigation', 'unified Nodes owns connection editor/provider auth/diagnostics', 'duplicating Settings navigation removed', 'History exact request answer Markdown and dialog deep-link', 'four request/attempt-scoped activity groups including failed retry without response', 'live activity before response', 'exact response anchor', 'lazy details', 'older inline detail/output pagination outside current inspector page', 'safe GFM structures', 'partial-to-final message versions without duplicate DOM', 'raw HTML and dangerous URL inert', 'no external Markdown image requests', 'exact fenced-source copy', 'long code/table local overflow', 'retained data/draft', 'reconnect refetch without command replay', 'blocked auth preserves history', 'tool output continuation', 'keyboard focus', 'pending IDs only', 'reload receipt no replay', 'QHD/390/laptop screenshots', 'History effective 200% zoom viewport without page overflow'] }, null, 2));
+  console.log('PASS HL-311 follow-up controlled DTO fixtures: Enter/IME, render-aware auto-scroll, compact execution context, safe/versioned GFM and zero provider calls.');
 } catch (error) {
   await page.screenshot({ path: join(out, 'dialogs-ui-failure.png'), fullPage: true }).catch(() => {});
   console.error(error.message);
