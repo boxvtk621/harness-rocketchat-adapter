@@ -123,7 +123,7 @@ function BuildRelease {
     foreach($name in $repositories){
         $archive=Join-Path $release ($name+'.tar');$dest=Join-Path $release $name
         [IO.Directory]::CreateDirectory($dest)|Out-Null
-        $null=Git $sources[$name].path @('archive','--format=tar',"--output=$archive",$sources[$name].revision)
+        $null=Git $sources[$name].path @('-c','core.autocrlf=false','archive','--format=tar',"--output=$archive",$sources[$name].revision)
         Native docker @('run','--rm','--mount',"type=bind,source=$release,target=/release",$script:state.toolImage,'tar','-xf',"/release/$name.tar",'-C',"/release/$name")|Out-Host
     }
     $builds=@{client=@('harness-rocketchat-adapter','web/src/Client','Dockerfile');gateway=@('harness-rocketchat-adapter','web/src/Gateway','Dockerfile');adapter=@('harness-rocketchat-adapter','','Dockerfile');'cursor-harness'=@('harness-cursor','','delivery/Dockerfile.cursor');'codex-harness'=@('harness-codex','','Dockerfile')}
