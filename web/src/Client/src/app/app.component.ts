@@ -10,8 +10,9 @@ import { ProviderAuthComponent } from './provider-auth.component';
 import { MarkdownRendererComponent } from './markdown/markdown-renderer.component';
 import { UiIconComponent } from './ui-icon.component';
 import { firstValueFrom } from 'rxjs';
-import { ToolCallSummary } from './dialogs/dialogs.models';
-import { toolCallDuration } from './dialogs/tool-activity';
+import { ToolCallDetail, ToolCallRead, ToolCallSummary } from './dialogs/dialogs.models';
+import { ToolActivityComponent } from './dialogs/tool-activity.component';
+import { ToolActivityGroup, ToolActivitySelection, ToolActivityState } from './dialogs/tool-activity.models';
 
 interface Observation {
   attemptedAt: string | null;
@@ -163,11 +164,6 @@ interface HistoryRow {
   messages: MessageProjection[];
 }
 
-interface HistoryToolUsage extends ToolCallSummary {
-  attemptId: string;
-  attemptGeneration: number;
-}
-
 interface ManagedNodeRow {
   connection: Connection;
   projection: NodeProjection | null;
@@ -188,7 +184,7 @@ type RefreshTarget = Resource | 'dialogs';
 @Component({
   selector: 'app-root',
   standalone: true,
-  imports: [CommonModule, FormsModule, DialogsComponent, ProviderAuthComponent, MarkdownRendererComponent, UiIconComponent],
+  imports: [CommonModule, FormsModule, DialogsComponent, ProviderAuthComponent, MarkdownRendererComponent, ToolActivityComponent, UiIconComponent],
   templateUrl: './app.component.html'
 })
 export class AppComponent implements OnInit, OnDestroy {
@@ -215,10 +211,14 @@ export class AppComponent implements OnInit, OnDestroy {
 
   readonly selectedWorkId = signal<string | null>(null);
   readonly selectedHistoryId = signal<string | null>(null);
-  readonly historyTools = signal<HistoryToolUsage[]>([]);
+  readonly historyToolGroups = signal<ToolActivityGroup[]>([]);
   readonly historyToolsLoading = signal(false);
   readonly historyToolsError = signal('');
   readonly historyToolsPartial = signal(false);
+  readonly selectedHistoryToolCallId = signal<string | null>(null);
+  readonly historyToolDetail = signal<ToolCallDetail | null>(null);
+  readonly historyToolDetailLoading = signal(false);
+  readonly historyToolDetailError = signal('');
   readonly selectedNodeId = signal<string | null>(null);
   readonly selectedConnectionId = signal<string | null>(null);
 
@@ -245,6 +245,8 @@ export class AppComponent implements OnInit, OnDestroy {
   private readonly pending = new Set<Resource>();
   private readonly queuedResources = new Set<RefreshTarget>();
   private historyToolsLoadRevision = 0;
+  private historyToolDetailRevision = 0;
+  private lastHistoryToolSelection: ToolActivitySelection | null = null;
   private readonly users = new UserManager({
     authority: runtimeConfig.oidcAuthority,
     client_id: runtimeConfig.oidcClientId,
@@ -718,41 +720,93 @@ export class AppComponent implements OnInit, OnDestroy {
     return this.requestMessageText(item) ?? item.requestTitle?.trim() ?? 'Текст обращения не предоставлен.';
   }
 
-  historyToolKind(tool: HistoryToolUsage): string {
-    const name = tool.toolName.toLocaleLowerCase('en');
-    if (/command|shell|terminal|exec/.test(name)) return 'Терминал';
-    if (/read|fetch|get|open/.test(name)) return 'Чтение';
-    if (/write|edit|patch|change/.test(name)) return 'Изменение';
-    if (/find|search|query|list/.test(name)) return 'Поиск';
-    if (/browser|navigate|click/.test(name)) return 'Браузер';
-    return 'Инструмент';
-  }
-
-  historyToolName(tool: HistoryToolUsage): string { return tool.toolName.replace(/[._-]+/g, ' '); }
-  historyToolDuration(tool: HistoryToolUsage): string { return toolCallDuration(tool); }
-  historyToolStateLabel(tool: HistoryToolUsage): string {
-    if (tool.state === 'running') return 'Выполняется';
-    if (tool.state === 'succeeded') return 'Завершено';
-    if (tool.state === 'failed') return 'Ошибка';
-    return 'Исход неизвестен';
-  }
-  historyToolStateClass(tool: HistoryToolUsage): string {
-    if (tool.state === 'succeeded') return 'done';
-    if (tool.state === 'failed') return 'failed';
-    if (tool.state === 'running') return 'running';
-    return 'unknown';
-  }
   historyToolsCountLabel(): string {
-    const count = this.historyTools().length;
+    const count = this.historyToolGroups().reduce((total, group) => total + group.calls.length, 0);
     const remainder = count % 100;
     const digit = count % 10;
     const noun = remainder >= 11 && remainder <= 14 ? 'операций' : digit === 1 ? 'операция' : digit >= 2 && digit <= 4 ? 'операции' : 'операций';
     return `${count} ${noun}`;
   }
-  trackHistoryTool(_: number, tool: HistoryToolUsage): string { return `${tool.attemptId}:${tool.toolCallId}`; }
   retryHistoryTools(): void {
     const selected = this.selectedHistory();
     if (selected) void this.loadHistoryTools(selected);
+  }
+
+  async inspectHistoryTool(selection: ToolActivitySelection): Promise<void> {
+    const item = this.selectedHistory();
+    const connection = item ? this.connectionFor(item.connectionId) : undefined;
+    const headers = this.headers();
+    if (!item || !connection || !headers) return;
+
+    const revision = ++this.historyToolDetailRevision;
+    this.lastHistoryToolSelection = selection;
+    this.selectedHistoryToolCallId.set(selection.toolCall.toolCallId);
+    this.historyToolDetail.set(null);
+    this.historyToolDetailError.set('');
+    this.historyToolDetailLoading.set(true);
+    const base = `/api/dialogs/${encodeURIComponent(item.connectionId)}/nodes/${encodeURIComponent(item.nodeId)}`;
+    const params = new HttpParams().set('configEpoch', connection.configEpoch).set('limit', 50);
+    try {
+      const read = await firstValueFrom(this.http.get<ToolCallRead>(
+        `${base}/attempts/${encodeURIComponent(selection.attemptId)}/tool-calls/${encodeURIComponent(selection.toolCall.toolCallId)}`,
+        { headers, params }
+      ));
+      if (revision !== this.historyToolDetailRevision || this.selectedHistoryId() !== item.key) return;
+      this.historyToolDetail.set(this.historyToolDetailFromRead(read));
+    } catch {
+      if (revision === this.historyToolDetailRevision && this.selectedHistoryId() === item.key) {
+        this.historyToolDetailError.set('Не удалось загрузить аргументы и результат операции.');
+      }
+    } finally {
+      if (revision === this.historyToolDetailRevision) this.historyToolDetailLoading.set(false);
+    }
+  }
+
+  closeHistoryToolDetail(): void {
+    this.historyToolDetailRevision++;
+    this.lastHistoryToolSelection = null;
+    this.selectedHistoryToolCallId.set(null);
+    this.historyToolDetail.set(null);
+    this.historyToolDetailError.set('');
+    this.historyToolDetailLoading.set(false);
+  }
+
+  retryHistoryToolDetail(): void {
+    if (this.lastHistoryToolSelection) void this.inspectHistoryTool(this.lastHistoryToolSelection);
+  }
+
+  async loadMoreHistoryToolOutputs(): Promise<void> {
+    const item = this.selectedHistory();
+    const connection = item ? this.connectionFor(item.connectionId) : undefined;
+    const detail = this.historyToolDetail();
+    const headers = this.headers();
+    if (!item || !connection || !detail?.nextOutputCursor || !headers || this.historyToolDetailLoading()) return;
+
+    const revision = ++this.historyToolDetailRevision;
+    this.historyToolDetailLoading.set(true);
+    this.historyToolDetailError.set('');
+    const base = `/api/dialogs/${encodeURIComponent(item.connectionId)}/nodes/${encodeURIComponent(item.nodeId)}`;
+    const params = new HttpParams()
+      .set('configEpoch', connection.configEpoch)
+      .set('after', detail.nextOutputCursor)
+      .set('limit', 50);
+    try {
+      const read = await firstValueFrom(this.http.get<ToolCallRead>(
+        `${base}/attempts/${encodeURIComponent(detail.attemptId)}/tool-calls/${encodeURIComponent(detail.toolCallId)}`,
+        { headers, params }
+      ));
+      if (revision !== this.historyToolDetailRevision || this.selectedHistoryId() !== item.key) return;
+      const next = this.historyToolDetailFromRead(read);
+      const outputs = new Map(detail.outputs.map(output => [output.index, output]));
+      next.outputs.forEach(output => outputs.set(output.index, output));
+      this.historyToolDetail.set({ ...next, outputs: [...outputs.values()].sort((left, right) => left.index - right.index) });
+    } catch {
+      if (revision === this.historyToolDetailRevision && this.selectedHistoryId() === item.key) {
+        this.historyToolDetailError.set('Не удалось загрузить продолжение журнала операции.');
+      }
+    } finally {
+      if (revision === this.historyToolDetailRevision) this.historyToolDetailLoading.set(false);
+    }
   }
 
   connectionFor(connectionId: string): Connection | undefined { return this.connections().find(item => item.id === connectionId); }
@@ -771,10 +825,16 @@ export class AppComponent implements OnInit, OnDestroy {
 
   private async loadHistoryTools(item: HistoryRow): Promise<void> {
     const revision = ++this.historyToolsLoadRevision;
-    this.historyTools.set([]);
+    this.historyToolDetailRevision++;
+    this.historyToolGroups.set([]);
     this.historyToolsError.set('');
     this.historyToolsPartial.set(false);
     this.historyToolsLoading.set(false);
+    this.lastHistoryToolSelection = null;
+    this.selectedHistoryToolCallId.set(null);
+    this.historyToolDetail.set(null);
+    this.historyToolDetailError.set('');
+    this.historyToolDetailLoading.set(false);
     if (!item.requestId) return;
 
     const connection = this.connectionFor(item.connectionId);
@@ -795,12 +855,21 @@ export class AppComponent implements OnInit, OnDestroy {
         headers
       )));
       if (revision !== this.historyToolsLoadRevision || this.selectedHistoryId() !== item.key) return;
-      this.historyTools.set(toolPages.flatMap((page, index) => page.items.map(tool => ({
-        ...tool,
-        attemptId: attempts.items[index].attemptId,
-        attemptGeneration: attempts.items[index].generation ?? index + 1
-      }))).sort((left, right) => Date.parse(left.startedAt) - Date.parse(right.startedAt)));
+      const groups = attempts.items.map((attempt, index): ToolActivityGroup => ({
+        key: `${item.requestId}:${attempt.attemptId}`,
+        requestId: item.requestId!,
+        attemptId: attempt.attemptId,
+        generation: attempt.generation ?? index + 1,
+        state: this.historyToolGroupState(attempt, toolPages[index].items),
+        anchor: { messageId: null, placement: 'tail' },
+        calls: [...toolPages[index].items].sort((left, right) => Date.parse(left.startedAt) - Date.parse(right.startedAt)),
+        pagination: { loadedCount: toolPages[index].items.length, nextCursor: null, hasMore: false, loading: false }
+      })).filter(group => group.calls.length > 0).sort((left, right) => left.generation - right.generation);
+      this.historyToolGroups.set(groups);
       this.historyToolsPartial.set(attempts.partial || toolPages.some(page => page.partial));
+      const firstGroup = groups[0];
+      const firstTool = firstGroup?.calls[0];
+      if (firstGroup && firstTool) void this.inspectHistoryTool({ requestId: firstGroup.requestId, attemptId: firstGroup.attemptId, toolCall: firstTool });
     } catch {
       if (revision === this.historyToolsLoadRevision && this.selectedHistoryId() === item.key) {
         this.historyToolsError.set('Не удалось загрузить операции именно этого обращения.');
@@ -822,6 +891,30 @@ export class AppComponent implements OnInit, OnDestroy {
       pages++;
     } while (cursor && pages < 10);
     return { items, partial: !!cursor };
+  }
+
+  private historyToolGroupState(attempt: AttemptProjection, calls: readonly ToolCallSummary[]): ToolActivityState {
+    const state = attempt.state.toLocaleLowerCase('en');
+    if (['dispatching', 'running', 'waiting_input', 'stopping'].includes(state)) return 'running';
+    if (state === 'failed') return 'failed';
+    if (state === 'interrupted') return 'interrupted';
+    if (state === 'completed' && calls.some(call => call.state === 'failed')) return 'failed';
+    if (state === 'completed' && calls.every(call => call.state === 'succeeded')) return 'succeeded';
+    return 'unknown';
+  }
+
+  private historyToolDetailFromRead(read: ToolCallRead): ToolCallDetail {
+    return {
+      ...read.toolCall,
+      nodeId: read.nodeId,
+      dialogId: read.dialogId,
+      requestId: read.requestId,
+      attemptId: read.attemptId,
+      input: read.toolCall.input,
+      result: read.toolCall.result,
+      outputs: read.toolCall.outputs,
+      nextOutputCursor: read.toolCall.nextOutputCursor ?? null
+    };
   }
 
   private loadProjection(kind: 'nodes' | 'work' | 'history', showLoading = true): void {

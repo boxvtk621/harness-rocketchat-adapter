@@ -16,6 +16,7 @@ export class ToolActivityComponent implements OnChanges {
   @Input() selectedToolCallId: string | null = null;
   @Input() toolDetail: ToolCallDetail | null = null;
   @Input() loading = false;
+  @Input() initiallyOpen = false;
 
   @Output() readonly inspect = new EventEmitter<ToolActivitySelection>();
   @Output() readonly close = new EventEmitter<void>();
@@ -31,7 +32,7 @@ export class ToolActivityComponent implements OnChanges {
     if (this.currentKey !== this.group.key) {
       this.currentKey = this.group.key;
       this.manuallyToggled = false;
-      this.open = this.group.state === 'running';
+      this.open = this.initiallyOpen || this.group.state === 'running';
       return;
     }
     if (!this.manuallyToggled && this.group.state === 'running') this.open = true;

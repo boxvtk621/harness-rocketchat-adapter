@@ -129,18 +129,24 @@
                   </section>
                   <section data-testid="history-tools" class="history-tools" aria-labelledby="history-tools-title">
                     <div class="history-section-head">
-                      <div><h3 id="history-tools-title">Использованные инструменты</h3><p *ngIf="historyTools().length">{{ historyToolsCountLabel() }} в {{ historyTools().length === 1 ? 'ответе' : 'обработке запроса' }}</p></div>
+                      <div><h3 id="history-tools-title">Использованные инструменты</h3><p *ngIf="historyToolGroups().length">{{ historyToolsCountLabel() }} в обработке запроса</p></div>
                     </div>
                     <p class="history-tools-state" *ngIf="historyToolsLoading()" role="status">Загружаем операции этого запроса…</p>
                     <div class="history-tools-state error" *ngIf="!historyToolsLoading() && historyToolsError()" role="alert"><span>{{ historyToolsError() }}</span><button type="button" (click)="retryHistoryTools()">Повторить</button></div>
-                    <ol class="history-tool-list" *ngIf="!historyToolsLoading() && !historyToolsError() && historyTools().length">
-                      <li *ngFor="let tool of historyTools(); let index = index; trackBy: trackHistoryTool" [attr.data-testid]="'history-tool-' + safeTestId(tool.toolCallId)">
-                        <span class="history-tool-index" aria-hidden="true">{{ index + 1 }}</span>
-                        <span class="history-tool-main"><span class="history-tool-kind">{{ historyToolKind(tool) }}</span><strong>{{ historyToolName(tool) }}</strong><small>Попытка {{ tool.attemptGeneration }} · {{ historyToolDuration(tool) }}</small></span>
-                        <span [class]="'history-tool-status ' + historyToolStateClass(tool)">{{ historyToolStateLabel(tool) }}</span>
-                      </li>
-                    </ol>
-                    <p class="history-tools-state" *ngIf="!historyToolsLoading() && !historyToolsError() && !historyTools().length">Для ответа на этот запрос инструменты не использовались.</p>
+                    <div class="history-activity-stack" *ngIf="!historyToolsLoading() && !historyToolsError() && historyToolGroups().length">
+                      <app-tool-activity
+                        *ngFor="let group of historyToolGroups(); trackBy: trackGroup"
+                        [group]="group"
+                        [initiallyOpen]="true"
+                        [selectedToolCallId]="selectedHistoryToolCallId()"
+                        [toolDetail]="historyToolDetail()"
+                        [loading]="historyToolDetailLoading()"
+                        (inspect)="inspectHistoryTool($event)"
+                        (close)="closeHistoryToolDetail()"
+                        (loadMoreOutputs)="loadMoreHistoryToolOutputs()" />
+                    </div>
+                    <div class="history-tools-state error" *ngIf="historyToolDetailError()" role="alert"><span>{{ historyToolDetailError() }}</span><button type="button" (click)="retryHistoryToolDetail()">Повторить</button></div>
+                    <p class="history-tools-state" *ngIf="!historyToolsLoading() && !historyToolsError() && !historyToolGroups().length">Для ответа на этот запрос инструменты не использовались.</p>
                     <p class="history-tools-note" *ngIf="historyToolsPartial()">Показаны первые 1000 операций на попытку.</p>
                   </section>
                   <details class="history-diagnostics"><summary>Технические данные</summary><dl><dt>Request ID</dt><dd class="mono wrap">{{ item.requestId || 'Нет данных' }}</dd><dt>Dialog ID</dt><dd class="mono wrap">{{ item.dialogId }}</dd><dt>Node ID</dt><dd class="mono wrap">{{ item.nodeId }}</dd></dl></details>

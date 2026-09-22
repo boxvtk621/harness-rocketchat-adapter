@@ -56,7 +56,7 @@ const failedTool = { toolCallId: id(6), toolName: 'fixture_failure', state: 'fai
 const summary2 = { toolCallId: toolId2, toolName: 'render_markdown_fixture', state: 'succeeded', startedAt: now, finishedAt: now, detailVersion: 1 };
 const retrySummary = { toolCallId: retryToolId, toolName: 'failed_retry_fixture', state: 'failed', startedAt: now, finishedAt: now, detailVersion: 1 };
 const summary3 = { toolCallId: toolId3, toolName: 'running_fixture', state: 'running', startedAt: now, detailVersion: 1 };
-const deepSummary = { toolCallId: deepToolId, toolName: 'read_history_fixture', state: 'succeeded', startedAt: now, finishedAt: now, detailVersion: 1 };
+const deepSummary = { toolCallId: deepToolId, toolName: 'cursor.command', state: 'succeeded', startedAt: now, finishedAt: now, detailVersion: 1 };
 const envelope = { protocolVersion: 1, schemaId: 'harness-wire-v2', nodeId, epoch: 1, snapshotStateVersion: 90, stateVersion: 90, lastEventSeq: 90 };
 const pageDto = (items, pageType, extra = {}) => ({ ...envelope, items, nextCursor: null, pageType, ...extra });
 const canonical = x => x === null || typeof x !== 'object' ? JSON.stringify(x) : Array.isArray(x) ? `[${x.map(canonical).join(',')}]` : `{${Object.keys(x).sort().map(k => `${JSON.stringify(k)}:${canonical(x[k])}`).join(',')}}`;
@@ -125,6 +125,16 @@ await page.route('**/api/dialogs/**', async route => {
   if (path === `attempts/${retryAttemptId}/tool-calls`) return json(pageDto([retrySummary], 'tool_calls', { schemaId: 'tool-timeline-v1', dialogId, requestId: requestId2, attemptId: retryAttemptId }));
   if (path === `attempts/${attemptId3}/tool-calls`) return json(pageDto([summary3], 'tool_calls', { schemaId: 'tool-timeline-v1', dialogId, requestId: requestId3, attemptId: attemptId3 }));
   if (path === `attempts/${deepAttemptId}/tool-calls`) return json(pageDto([deepSummary], 'tool_calls', { schemaId: 'tool-timeline-v1', dialogId: deepDialogId, requestId: deepRequestId, attemptId: deepAttemptId }));
+  if (path === `attempts/${deepAttemptId}/tool-calls/${deepToolId}`) {
+    const continuation = url.searchParams.has('after');
+    return json({ ...envelope, schemaId: 'tool-timeline-v1', dialogId: deepDialogId, requestId: deepRequestId, attemptId: deepAttemptId, toolCall: {
+      ...deepSummary,
+      input: safe('{"command":"ls -la /workspace","cwd":"/workspace","access":"read-only"}'),
+      result: safe('Файлы рабочей папки прочитаны; изменений не выполнено.'),
+      outputs: [{ index: continuation ? 2 : 1, stream: 'stdout', content: safe(continuation ? 'README.md' : 'total 8\ndrwxr-xr-x workspace'), observedAt: now }],
+      nextOutputCursor: continuation ? null : '1'
+    } });
+  }
   if (path?.startsWith(`attempts/${attemptId}/tool-calls/`)) {
     detailFetches++;
     const selected = path.endsWith(toolId) ? summary : failedTool;
@@ -329,9 +339,17 @@ try {
   assert.equal(await page.getByTestId('history-request-title').innerText(), 'Покажи Markdown и отдельные действия.', 'Request text is the inspector heading');
   assert.equal(await page.getByTestId('history-inspector').locator('h1').innerText(), 'Проверка GFM', 'Exact request answer renders as readable Markdown');
   assert.ok((await page.getByTestId('history-inspector').innerText()).includes('Покажи Markdown и отдельные действия.'));
-  await page.getByTestId(`history-tool-${deepToolId}`).waitFor();
-  assert.ok((await page.getByTestId('history-tools').innerText()).includes('read history fixture'), 'Exact request card shows the tool used for its answer');
-  assert.ok((await page.getByTestId('history-tools').innerText()).includes('Завершено'), 'Tool outcome is visible in history');
+  await page.getByTestId(`inline-tool-call-${deepToolId}`).waitFor();
+  const historyTools = page.getByTestId('history-tools');
+  await historyTools.getByTestId('tool-details').waitFor();
+  assert.ok((await historyTools.innerText()).includes('ls -la /workspace'), 'History opens the exact operation arguments without leaving the request card');
+  assert.ok((await historyTools.innerText()).includes('Файлы рабочей папки прочитаны'), 'History shows the exact tool result');
+  await historyTools.getByText('Журнал вывода', { exact: false }).click();
+  assert.ok((await historyTools.innerText()).includes('total 8'), 'History exposes the persisted output journal');
+  await historyTools.getByRole('button', { name: 'Загрузить продолжение', exact: true }).click();
+  await poll(async () => assert.ok((await historyTools.innerText()).includes('README.md')), 'History loads bounded output continuation');
+  await historyTools.getByText('Диагностика', { exact: false }).click();
+  assert.ok((await historyTools.innerText()).includes(deepToolId), 'History exposes exact tool identifiers on demand');
   await page.setViewportSize({ width: 2560, height: 1440 });
   await page.screenshot({ path: join(out, 'hl311-followup-history-qhd.png') });
   await page.setViewportSize({ width: 640, height: 360 });
