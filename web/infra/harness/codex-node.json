@@ -16,7 +16,7 @@
     "executable": "/opt/codex/node_modules/.bin/codex",
     "stateDir": "/state/codex",
     "workingDir": "/workspace",
-    "codexHome": "/state/codex/home/.codex",
+    "codexHome": "/provider-auth/codex-home",
     "homeDir": "/state/codex/home",
     "model": "fixture-no-provider-call",
     "effort": "low"

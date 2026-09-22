@@ -1,0 +1,16 @@
+services:
+  adapter:
+    environment:
+      Harness__AllowedHosts: cursor-harness,codex-harness,auth-fixture
+  auth-fixture:
+    image: node:24.18.0-bookworm-slim
+    command: ["node", "/fixture/auth-fixture.mjs"]
+    volumes:
+      - ./tests/e2e/auth-fixture.mjs:/fixture/auth-fixture.mjs:ro
+    secrets: [harness_server_key]
+    configs:
+      - source: harness_server_cert
+        target: /run/config/harness_server_cert
+    networks: [harness]
+  acceptance:
+    command: ["node", "auth-acceptance.mjs"]

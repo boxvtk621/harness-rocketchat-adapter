@@ -16,8 +16,8 @@
     "nodeExecutable": "/usr/local/bin/node",
     "workerEntrypoint": "/opt/worker/worker.mjs",
     "stateDir": "/state/cursor",
-    "workingDir": "",
-    "apiKeyFile": "/state/private/cursor.key",
+    "workingDir": "/workspace",
+    "credentialsDir": "/provider-auth",
     "model": "fixture-no-provider-call"
   }
 }

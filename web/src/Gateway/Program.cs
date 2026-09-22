@@ -2,6 +2,7 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Net.Http.Headers;
 using System.Security.Claims;
 using System.Text;
+using System.Text.Json;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
@@ -32,7 +33,9 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             ClockSkew = TimeSpan.FromSeconds(30)
         };
     });
-builder.Services.AddAuthorization();
+builder.Services.AddAuthorization(options => options.AddPolicy("connections.manage", policy =>
+    policy.RequireAuthenticatedUser().RequireAssertion(context => ConnectionPermissions.CanManage(context.User))));
+builder.Logging.AddFilter("System.Net.Http.HttpClient.adapter", LogLevel.Warning);
 builder.Services.AddHttpClient("adapter", client =>
 {
     client.BaseAddress = new Uri(adapterBaseUrl);
@@ -43,6 +46,31 @@ builder.Services.AddHealthChecks().AddCheck<AdapterHealthCheck>("adapter", tags:
 var app = builder.Build();
 app.UseAuthentication();
 app.UseAuthorization();
+app.Use(async (context, next) =>
+{
+    var sensitive = context.Request.Path.Value?.Contains("/provider-auth", StringComparison.OrdinalIgnoreCase) == true;
+    if (sensitive)
+    {
+        context.Response.Headers.CacheControl = "no-store";
+        context.Response.Headers.Pragma = "no-cache";
+        context.Response.Headers["Referrer-Policy"] = "no-referrer";
+        var size = context.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpMaxRequestBodySizeFeature>();
+        if (size is { IsReadOnly: false }) size.MaxRequestBodySize = 32768;
+        if (context.Request.ContentLength is > 32768)
+        {
+            context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
+            return;
+        }
+    }
+    if (context.Request.Path.StartsWithSegments("/api/connections") &&
+        (sensitive || context.Request.Method != "GET") &&
+        context.User.Identity?.IsAuthenticated == true && !ConnectionPermissions.CanManage(context.User))
+    {
+        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+        return;
+    }
+    await next(context);
+});
 
 app.MapHealthChecks("/health/live", new HealthCheckOptions { Predicate = _ => false });
 app.MapHealthChecks("/health/ready", new HealthCheckOptions { Predicate = r => r.Tags.Contains("ready") });
@@ -50,7 +78,8 @@ app.MapHealthChecks("/health/ready", new HealthCheckOptions { Predicate = r => r
 app.MapGet("/api/session", (ClaimsPrincipal user) => Results.Ok(new
 {
     subject = user.FindFirstValue("sub"),
-    name = user.FindFirstValue("preferred_username") ?? user.Identity?.Name
+    name = user.FindFirstValue("preferred_username") ?? user.Identity?.Name,
+    canManageConnections = ConnectionPermissions.CanManage(user)
 })).RequireAuthorization();
 
 app.MapGet("/api/realtime/token", (ClaimsPrincipal user) =>
@@ -72,6 +101,10 @@ app.MapGet("/api/realtime/token", (ClaimsPrincipal user) =>
 
 app.MapMethods("/api/connections/{**path}", ["GET", "POST", "PUT", "DELETE"], ProxyToAdapter)
     .RequireAuthorization();
+app.MapMethods("/api/connections/{id}/provider-auth/{**authPath}", ["GET", "POST"],
+    (HttpContext context, IHttpClientFactory factory, string id, string? authPath) =>
+        ProxyToAdapter(context, factory, $"{id}/provider-auth" + (string.IsNullOrEmpty(authPath) ? "" : $"/{authPath}")))
+    .RequireAuthorization("connections.manage");
 app.MapMethods("/api/connections", ["GET", "POST"], ProxyToAdapter)
     .RequireAuthorization();
 app.MapGet("/api/projections/nodes", (HttpContext context, IHttpClientFactory factory) => ProxyToAdapter(context, factory, "projections/nodes")).RequireAuthorization();
@@ -96,7 +129,33 @@ async Task ProxyToAdapter(HttpContext context, IHttpClientFactory factory, strin
 
     if (context.Request.ContentLength is > 0 || context.Request.Headers.ContainsKey("Transfer-Encoding"))
     {
-        request.Content = new StreamContent(context.Request.Body);
+        if (context.Request.Path.Value?.Contains("/provider-auth", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            // Read at most one bounded command before forwarding anything upstream.
+            // This is transient memory, never request logging or persistent storage.
+            using var bounded = new MemoryStream();
+            var chunk = new byte[4096];
+            try
+            {
+                int length;
+                while ((length = await context.Request.Body.ReadAsync(chunk, context.RequestAborted)) > 0)
+                {
+                    if (bounded.Length + length > 32768)
+                    {
+                        context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
+                        return;
+                    }
+                    bounded.Write(chunk, 0, length);
+                }
+            }
+            catch (BadHttpRequestException error)
+            {
+                context.Response.StatusCode = error.StatusCode;
+                return;
+            }
+            request.Content = new ByteArrayContent(bounded.ToArray());
+        }
+        else request.Content = new StreamContent(context.Request.Body);
         if (!string.IsNullOrWhiteSpace(context.Request.ContentType))
             request.Content.Headers.ContentType = MediaTypeHeaderValue.Parse(context.Request.ContentType);
     }
@@ -104,6 +163,7 @@ async Task ProxyToAdapter(HttpContext context, IHttpClientFactory factory, strin
     using var response = await factory.CreateClient("adapter").SendAsync(request, HttpCompletionOption.ResponseHeadersRead, context.RequestAborted);
     context.Response.StatusCode = (int)response.StatusCode;
     context.Response.ContentType = response.Content.Headers.ContentType?.ToString() ?? "application/json";
+    if (response.Headers.CacheControl?.NoStore == true) context.Response.Headers.CacheControl = "no-store";
     if (response.Headers.TryGetValues("X-Connection-Reused", out var reused))
         context.Response.Headers["X-Connection-Reused"] = reused.ToArray();
     await response.Content.CopyToAsync(context.Response.Body, context.RequestAborted);
@@ -136,3 +196,22 @@ sealed class AdapterHealthCheck(IHttpClientFactory clients) : IHealthCheck
 }
 
 public partial class Program;
+
+public static class ConnectionPermissions
+{
+    public static bool CanManage(ClaimsPrincipal user)
+    {
+        foreach (var claim in user.FindAll("realm_access"))
+        {
+            try
+            {
+                using var json = JsonDocument.Parse(claim.Value);
+                if (json.RootElement.TryGetProperty("roles", out var roles) && roles.ValueKind == JsonValueKind.Array &&
+                    roles.EnumerateArray().Any(role => role.ValueKind == JsonValueKind.String && role.GetString() == "connections.manage"))
+                    return true;
+            }
+            catch (JsonException) { }
+        }
+        return false;
+    }
+}

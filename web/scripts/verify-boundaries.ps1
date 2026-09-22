@@ -33,14 +33,14 @@ foreach ($serviceName in @('cursor-harness', 'codex-harness')) {
         throw "$serviceName must not publish host ports."
     }
     $networkNames = @($service.networks.PSObject.Properties.Name)
-    if ($networkNames.Count -ne 1 -or $networkNames[0] -ne 'harness') {
-        throw "$serviceName must be attached only to the isolated harness network."
+    if (($networkNames | Sort-Object) -join ',' -ne 'harness,provider-egress') {
+        throw "$serviceName must use only the private Harness network and provider egress."
     }
 }
 
 foreach ($serviceName in @('client', 'gateway')) {
     $networkNames = @($compose.services.$serviceName.networks.PSObject.Properties.Name)
-    if ($networkNames -contains 'harness') {
+    if ($networkNames -contains 'harness' -or $networkNames -contains 'provider-egress') {
         throw "$serviceName must not be attached to the harness network."
     }
 }
@@ -57,4 +57,4 @@ if (($published -join ',') -ne 'client,keycloak') {
     throw "Only Client and Keycloak may publish ports; found: $($published -join ', ')"
 }
 
-Write-Host 'PASS: Gateway has no DB access, projections are explicitly allowlisted with query preservation, and only Adapter can reach isolated Harness services with no Harness host ports.'
+Write-Host 'PASS: Gateway has no DB access, API prefix/query is preserved, browser-facing services cannot reach Harness, and Harness has provider egress without published ports.'

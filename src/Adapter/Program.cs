@@ -25,17 +25,36 @@ builder.Services.AddHttpClient<IHarnessClient, HarnessClient>(client =>
 }).ConfigurePrimaryHttpMessageHandler(sp => HarnessTls.CreateHandler(sp.GetRequiredService<IOptions<HarnessOptions>>()));
 builder.Logging.AddFilter("System.Net.Http.HttpClient.IHarnessClient", LogLevel.Warning);
 builder.Logging.AddFilter("System.Net.Http.HttpClient.HarnessClient", LogLevel.Warning);
+builder.Services.AddHttpClient<IProviderAuthClient, ProviderAuthClient>(client => client.Timeout = Timeout.InfiniteTimeSpan)
+    .ConfigurePrimaryHttpMessageHandler(sp => HarnessTls.CreateHandler(sp.GetRequiredService<IOptions<HarnessOptions>>()));
+builder.Logging.AddFilter("System.Net.Http.HttpClient.IProviderAuthClient", LogLevel.None);
 builder.Services.AddHostedService<HarnessObservationService>();
 builder.Services.AddHostedService<HarnessEventInvalidationService>();
 builder.Services.AddHttpClient<ICentrifugoPublisher, CentrifugoPublisher>();
 builder.Services.AddHealthChecks().AddCheck<MongoReadinessHealthCheck>("mongodb-ready", tags: ["ready"]);
 
 var app = builder.Build();
+app.Use(async (context, next) =>
+{
+    if (context.Request.Path.Value?.Contains("/provider-auth", StringComparison.OrdinalIgnoreCase) == true)
+    {
+        context.Response.Headers.CacheControl = "no-store";
+        var size = context.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpMaxRequestBodySizeFeature>();
+        if (size is { IsReadOnly: false }) size.MaxRequestBodySize = 32768;
+        if (context.Request.ContentLength is > 32768)
+        {
+            context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
+            return;
+        }
+    }
+    await next(context);
+});
 
 app.MapHealthChecks("/health/live", new HealthCheckOptions { Predicate = _ => false });
 app.MapHealthChecks("/health/ready", new HealthCheckOptions { Predicate = check => check.Tags.Contains("ready") });
 
 var connections = app.MapGroup("/api/connections").RequireInternalToken();
+connections.MapProviderAuth();
 connections.MapGet("/", async (IConnectionRepository store, CancellationToken ct) =>
 {
     var items = await store.ListAsync(ct);

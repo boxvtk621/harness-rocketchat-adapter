@@ -9,6 +9,7 @@ assert.match(project ?? '', /^hl307-[a-z0-9-]+$/);
 assert.equal(process.env.ACCEPTANCE_ISOLATED, 'true');
 const base = process.env.BASE_URL;
 const apiBase = process.env.API_BASE_URL;
+const authBlocked = process.env.EXPECT_PROVIDER_AUTH_BLOCKED === 'true';
 for (const url of [base, apiBase]) assert.ok(['localhost', 'host.docker.internal', '127.0.0.1'].includes(new URL(url).hostname));
 const out = process.env.OUTPUT_DIR ?? '/output';
 await mkdir(out, { recursive: true });
@@ -60,14 +61,16 @@ try {
   await page.locator('#password').fill(password);
   await page.locator('#kc-login').click();
   await page.getByTestId('screen-work').waitFor({ timeout: 45000 });
+  const existingConnections = await json('/api/connections');
   for (const name of ['cursor', 'codex']) {
+    if (existingConnections.some(connection => connection.baseUri === `https://${name}-harness:8443/`)) continue;
     const response = await api('POST', '/api/connections', { name: `${name} · проверка HL-307`, baseUri: `https://${name}-harness:8443/`, observationIntervalSeconds: 2, requestTimeoutSeconds: 5, staleThresholdSeconds: 15 });
-    assert.ok([200,201].includes(response.status()));
+    assert.ok([200,201].includes(response.status()), `Connection registration failed: ${response.status()} ${await response.text()}`);
   }
   const nodes = await poll(async () => {
     const value = await json('/api/projections/nodes');
     assert.equal(value.length, 2);
-    assert.ok(value.every(n => n.observation.ready === true && n.identityStatus === 'unique'));
+    assert.ok(value.every(n => n.observation.ready === !authBlocked && n.identityStatus === 'unique'));
     return value;
   }, 'Two actual Harness nodes ready');
   for (const node of nodes) {
@@ -82,6 +85,21 @@ try {
       'X-Harness-Expected-Adapter-Version': identity.adapter.version
     });
     const create = { protocolVersion: 1, schemaId: 'harness-wire-v2', commandId: uuid(`${node.observation.nodeId}:create`), kind: 'dialog.create', target: { nodeId: node.observation.nodeId }, expected: { registryVersion: identity.registryVersion }, payload: { title: `HL-307 · ${node.name} · очередь без модели` } };
+    if (authBlocked) {
+      const prior = await json(`${root}/commands/${create.commandId}?${q}`);
+      assert.equal(prior.status, 'accepted');
+      const dialogId = prior.receipt.references.dialogId;
+      const history = await json(`${root}/dialogs/${dialogId}/history?${q}&order=latest&limit=10`);
+      assert.equal(history.items.length, 2);
+      const requests = await json(`${root}/requests?${q}&dialogId=${dialogId}&limit=30`);
+      assert.equal(requests.items.length, 2);
+      assert.ok(requests.items.every(request => request.status === 'queued'));
+      const rejected = await api('POST', `${root}/commands?${q}`, { ...create, commandId: uuid(`${node.observation.nodeId}:auth-blocked-create`) });
+      assert.equal(rejected.status(), 503);
+      assert.equal((await rejected.json()).code, 'node_not_ready');
+      fixtures.push({ node, root, q, dialogId, requests: requests.items });
+      continue;
+    }
     const created = await api('POST', `${root}/commands?${q}`, create);
     assert.ok([200,202].includes(created.status()), `Create failed: ${created.status()}`);
     const receipt = await created.json();
@@ -113,18 +131,23 @@ try {
     assert.equal((await api('POST', `${root}/commands?${q}`, stale)).status(), 409);
     fixtures.push({ node, root, q, dialogId, requests: requests.items });
   }
-  await writeFile(join(out, 'dialogs-real-api-evidence.json'), JSON.stringify({ providerCalls: 0, mode: 'actual Harness persisted queue / manual dispatch', fixtures }, null, 2));
+  await writeFile(join(out, authBlocked ? 'dialogs-auth-blocked-evidence.json' : 'dialogs-real-api-evidence.json'), JSON.stringify({ providerCalls: 0, mode: authBlocked ? 'integrated provider auth: retained history and rejected new commands' : 'actual Harness persisted queue / manual dispatch', fixtures }, null, 2));
   await page.getByTestId('nav-dialogs').click();
   await page.getByTestId('screen-dialogs').waitFor();
   await page.getByTestId(`dialog-row-${fixtures[0].dialogId}`).click();
   await page.getByTestId('message-input').waitFor();
-  await page.screenshot({ path: join(out, 'dialogs-real-queue-qhd.png'), fullPage: true });
+  if (authBlocked) {
+    await page.getByTestId('message-input').fill('Blocked draft must not be submitted');
+    assert.ok(await page.getByTestId('send-message').isDisabled());
+  }
+  const screenshotPrefix = authBlocked ? 'dialogs-real-auth-blocked' : 'dialogs-real-queue';
+  await page.screenshot({ path: join(out, `${screenshotPrefix}-qhd.png`), fullPage: true });
   assert.equal(await page.evaluate(() => getComputedStyle(document.documentElement).fontSize), '13px');
   await page.setViewportSize({ width: 390, height: 844 });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 390);
-  await page.screenshot({ path: join(out, 'dialogs-real-queue-390.png'), fullPage: true });
+  await page.screenshot({ path: join(out, `${screenshotPrefix}-390.png`), fullPage: true });
   assert.deepEqual(errors, []);
-  console.log('PASS actual Harness API: two nodes, exact replay/concurrent enqueue, payload conflict, stale versions, persisted bounded history, existing queue; provider calls=0.');
+  console.log(authBlocked ? 'PASS integrated Harness auth: two nodes, persisted receipts/history/queue, rejected new commands; provider calls=0.' : 'PASS actual Harness API: two nodes, exact replay/concurrent enqueue, payload conflict, stale versions, persisted bounded history, existing queue; provider calls=0.');
 } catch (error) {
   await page.screenshot({ path: join(out, 'dialogs-failure.png'), fullPage: true }).catch(() => {});
   console.error(String(error.message));

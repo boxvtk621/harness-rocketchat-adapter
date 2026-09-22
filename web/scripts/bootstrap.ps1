@@ -10,7 +10,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-if ($ProjectName -notmatch '^hl(?:305|307)-[a-z0-9-]+$') { throw 'Use a dedicated hl305-* or hl307-* project for acceptance.' }
+if ($ProjectName -notmatch '^hl30[567]-[a-z0-9-]+$') { throw 'Use a dedicated hl305-*, hl306-* or hl307-* project for acceptance.' }
 if ($ClientPort -lt 1024 -or $ClientPort -gt 65535 -or $KeycloakPort -lt 1024 -or $KeycloakPort -gt 65535) { throw 'Use unprivileged valid TCP ports.' }
 if ($ClientPort -eq 18100 -or $KeycloakPort -eq 18180 -or $ClientPort -eq $KeycloakPort) { throw 'Acceptance ports must differ from the working stack.' }
 & (Join-Path $PSScriptRoot 'assert-isolated-owner.ps1') -ProjectName $ProjectName -ProjectRoot $root
@@ -62,6 +62,7 @@ function Set-SecretIfMissing([string]$name, [string]$value) {
 $mongoUser = Set-SecretIfMissing 'mongodb_root_username' 'hl303_root'
 $mongoPassword = Set-SecretIfMissing 'mongodb_root_password' (New-RandomSecret)
 $devPassword = Set-SecretIfMissing 'keycloak_dev_user_password' (New-RandomSecret 18)
+Set-SecretIfMissing 'keycloak_dev_viewer_password' (New-RandomSecret 18) | Out-Null
 Set-SecretIfMissing 'keycloak_admin_password' (New-RandomSecret) | Out-Null
 Set-SecretIfMissing 'adapter_internal_token' (New-RandomSecret) | Out-Null
 Set-SecretIfMissing 'centrifugo_client_secret' (New-RandomSecret) | Out-Null
@@ -69,21 +70,20 @@ Set-SecretIfMissing 'centrifugo_api_key' (New-RandomSecret) | Out-Null
 $escapedUser = [Uri]::EscapeDataString($mongoUser)
 $escapedPassword = [Uri]::EscapeDataString($mongoPassword)
 Set-SecretIfMissing 'mongodb_connection_string' "mongodb://${escapedUser}:${escapedPassword}@mongodb:27017/?authSource=admin" | Out-Null
-Set-SecretIfMissing 'cursor_fixture_key' 'fixture-only-no-provider-request' | Out-Null
 
 $serverCert = Join-Path $harnessDir 'server.crt'
 $serverKey = Join-Path $harnessDir 'server.key'
 if (-not (Test-Path -LiteralPath $serverCert) -or -not (Test-Path -LiteralPath $serverKey)) {
     docker run --rm -v "${harnessDir}:/out" alpine/openssl req -x509 -newkey rsa:2048 -nodes `
         -keyout /out/server.key -out /out/server.crt -days 365 -subj '/CN=hl304-harness-local' `
-        -addext 'subjectAltName=DNS:cursor-harness,DNS:codex-harness' `
+        -addext 'subjectAltName=DNS:cursor-harness,DNS:codex-harness,DNS:auth-fixture' `
         -addext 'basicConstraints=critical,CA:TRUE' `
         -addext 'keyUsage=critical,digitalSignature,keyCertSign' -addext 'extendedKeyUsage=serverAuth'
     if ($LASTEXITCODE -ne 0) { throw 'Failed to generate isolated Harness TLS certificate in Docker.' }
 }
 
 Write-Host 'Local bootstrap secrets are ready in the gitignored .runtime/secrets directory.'
-Write-Host 'An isolated local Harness TLS certificate is ready; the Cursor fixture key is not a provider credential.'
+Write-Host 'An isolated local Harness TLS certificate is ready. Provider credentials must be entered through Web.'
 Write-Host 'Keycloak user: operator'
 Write-Host 'Keycloak password is in .runtime/secrets/keycloak_dev_user_password.'
 

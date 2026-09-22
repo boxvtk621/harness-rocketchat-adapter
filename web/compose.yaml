@@ -85,7 +85,7 @@ services:
       KC_HTTP_ENABLED: "true"
       DEV_USER_USERNAME: operator
       WEB_ORIGIN: http://localhost:${WEB_CLIENT_PORT:-18100}
-    secrets: [keycloak_admin_password, keycloak_dev_user_password]
+    secrets: [keycloak_admin_password, keycloak_dev_user_password, keycloak_dev_viewer_password]
     configs:
       - source: keycloak_start
         target: /opt/keycloak/bootstrap/start.sh
@@ -128,12 +128,11 @@ services:
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - >-
-        install -d -o 10001 -g 10001 -m 0700 /state/private /state/harness /state/cursor /state/cursor/home;
+        install -d -o 10001 -g 10001 -m 0700 /state/private /state/harness /state/cursor /state/cursor/home /provider-auth /workspace;
         install -o 10001 -g 10001 -m 0600 /run/secrets/harness_server_key /state/private/server.key;
         install -o 10001 -g 10001 -m 0644 /run/config/harness_server_cert /state/private/server.crt;
-        install -o 10001 -g 10001 -m 0600 /run/secrets/cursor_fixture_key /state/private/cursor.key;
         exec setpriv --reuid=10001 --regid=10001 --clear-groups /harness-node --config /config/node.json
-    networks: [harness]
+    networks: [harness, provider-egress]
     configs:
       - source: cursor_node_config
         target: /config/node.json
@@ -143,9 +142,10 @@ services:
         target: /config/tools-deny.json
       - source: harness_server_cert
         target: /run/config/harness_server_cert
-    secrets: [harness_server_key, cursor_fixture_key]
+    secrets: [harness_server_key]
     volumes:
       - cursor-harness-data:/state
+      - cursor-provider-auth:/provider-auth
     # The runtime config is intentionally supplied only by deployment and is
     # mounted read-only there. No host port is published.
     deploy:
@@ -162,11 +162,11 @@ services:
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - >-
-        install -d -o 10001 -g 10001 -m 0700 /state/private /state/harness /state/codex /state/codex/home /state/codex/home/.codex /workspace;
+        install -d -o 10001 -g 10001 -m 0700 /state/private /state/harness /state/codex /state/codex/home /provider-auth /provider-auth/codex-home /workspace;
         install -o 10001 -g 10001 -m 0600 /run/secrets/harness_server_key /state/private/server.key;
         install -o 10001 -g 10001 -m 0644 /run/config/harness_server_cert /state/private/server.crt;
         exec setpriv --reuid=10001 --regid=10001 --clear-groups /harness-node --config /config/node.json
-    networks: [harness]
+    networks: [harness, provider-egress]
     configs:
       - source: codex_node_config
         target: /config/node.json
@@ -179,6 +179,7 @@ services:
     secrets: [harness_server_key]
     volumes:
       - codex-harness-data:/state
+      - codex-provider-auth:/provider-auth
     # The runtime config is intentionally supplied only by deployment and is
     # mounted read-only there. No host port is published.
     deploy:
@@ -199,7 +200,7 @@ services:
       ACCEPTANCE_ISOLATED: ${ACCEPTANCE_ISOLATED:-false}
       COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-hl304}
       ACCEPTANCE_PROJECT_NAMESPACE: ${COMPOSE_PROJECT_NAME:-hl304}
-    secrets: [keycloak_dev_user_password]
+    secrets: [keycloak_dev_user_password, keycloak_dev_viewer_password]
     configs:
       - source: harness_server_cert
         target: /run/config/harness_server_cert
@@ -241,11 +242,11 @@ secrets:
   centrifugo_api_key: { file: ./.runtime/secrets/centrifugo_api_key }
   keycloak_admin_password: { file: ./.runtime/secrets/keycloak_admin_password }
   keycloak_dev_user_password: { file: ./.runtime/secrets/keycloak_dev_user_password }
+  keycloak_dev_viewer_password: { file: ./.runtime/secrets/keycloak_dev_viewer_password }
   mongodb_root_username: { file: ./.runtime/secrets/mongodb_root_username }
   mongodb_root_password: { file: ./.runtime/secrets/mongodb_root_password }
   mongodb_connection_string: { file: ./.runtime/secrets/mongodb_connection_string }
   harness_server_key: { file: ./.runtime/harness/server.key }
-  cursor_fixture_key: { file: ./.runtime/secrets/cursor_fixture_key }
 
 volumes:
   mongodb-data:
@@ -256,6 +257,10 @@ volumes:
     name: ${HL304_VOLUME_PREFIX:-hl304}-cursor-harness-data
   codex-harness-data:
     name: ${HL304_VOLUME_PREFIX:-hl304}-codex-harness-data
+  cursor-provider-auth:
+    name: ${HL304_VOLUME_PREFIX:-hl304}-cursor-provider-auth
+  codex-provider-auth:
+    name: ${HL304_VOLUME_PREFIX:-hl304}-codex-provider-auth
 
 networks:
   web:
@@ -266,3 +271,5 @@ networks:
   harness:
     name: ${COMPOSE_PROJECT_NAME:-hl304}-harness
     internal: true
+  provider-egress:
+    name: ${COMPOSE_PROJECT_NAME:-hl304}-provider-egress
