@@ -1,0 +1,655 @@
+{
+  "configs": {
+    "centrifugo_start": {
+      "file": "${DEV_RUNTIME_ROOT}/bootstrap/centrifugo-start.sh"
+    },
+    "client_runtime": {
+      "file": "${DEV_RUNTIME_ROOT}/client/runtime-config.js"
+    },
+    "codex_node_config": {
+      "file": "${DEV_RUNTIME_ROOT}/harness/codex-node.json"
+    },
+    "codex_tools": {
+      "file": "${DEV_RUNTIME_ROOT}/harness/codex-tools.json"
+    },
+    "cursor_node_config": {
+      "file": "${DEV_RUNTIME_ROOT}/harness/cursor-node.json"
+    },
+    "cursor_tools": {
+      "file": "${DEV_RUNTIME_ROOT}/harness/cursor-tools.json"
+    },
+    "harness_policy": {
+      "file": "${DEV_RUNTIME_ROOT}/harness/policy.txt"
+    },
+    "harness_server_cert": {
+      "file": "${DEV_RUNTIME_ROOT}/harness/server.crt"
+    },
+    "keycloak_realm": {
+      "file": "${DEV_RUNTIME_ROOT}/bootstrap/harness-realm.json"
+    },
+    "keycloak_start": {
+      "file": "${DEV_RUNTIME_ROOT}/bootstrap/keycloak-start.sh"
+    },
+    "test_workspace_marker": {
+      "file": "${DEV_RUNTIME_ROOT}/harness/hl307-test.txt"
+    }
+  },
+  "name": "harness-dev",
+  "networks": {
+    "harness": {
+      "name": "harness-dev-harness",
+      "ipam": {},
+      "internal": true,
+      "labels": {
+        "homelab.environment": "harness-dev"
+      }
+    },
+    "internal": {
+      "name": "harness-dev-internal",
+      "ipam": {},
+      "internal": true,
+      "labels": {
+        "homelab.environment": "harness-dev"
+      }
+    },
+    "provider-egress": {
+      "name": "harness-dev-provider-egress",
+      "ipam": {},
+      "labels": {
+        "homelab.environment": "harness-dev"
+      }
+    },
+    "web": {
+      "name": "harness-dev-web",
+      "ipam": {},
+      "labels": {
+        "homelab.environment": "harness-dev"
+      }
+    }
+  },
+  "secrets": {
+    "adapter_internal_token": {
+      "file": "${DEV_RUNTIME_ROOT}/secrets/adapter_internal_token"
+    },
+    "centrifugo_api_key": {
+      "file": "${DEV_RUNTIME_ROOT}/secrets/centrifugo_api_key"
+    },
+    "centrifugo_client_secret": {
+      "file": "${DEV_RUNTIME_ROOT}/secrets/centrifugo_client_secret"
+    },
+    "harness_server_key": {
+      "file": "${DEV_RUNTIME_ROOT}/harness/server.key"
+    },
+    "keycloak_admin_password": {
+      "file": "${DEV_RUNTIME_ROOT}/secrets/keycloak_admin_password"
+    },
+    "keycloak_dev_user_password": {
+      "file": "${DEV_RUNTIME_ROOT}/secrets/keycloak_dev_user_password"
+    },
+    "keycloak_dev_viewer_password": {
+      "file": "${DEV_RUNTIME_ROOT}/secrets/keycloak_dev_viewer_password"
+    },
+    "mongodb_connection_string": {
+      "file": "${DEV_RUNTIME_ROOT}/secrets/mongodb_connection_string"
+    },
+    "mongodb_root_password": {
+      "file": "${DEV_RUNTIME_ROOT}/secrets/mongodb_root_password"
+    },
+    "mongodb_root_username": {
+      "file": "${DEV_RUNTIME_ROOT}/secrets/mongodb_root_username"
+    }
+  },
+  "services": {
+    "adapter": {
+      "command": null,
+      "configs": [
+        {
+          "source": "harness_server_cert",
+          "target": "/etc/ssl/certs/hl304-harness.crt"
+        }
+      ],
+      "depends_on": {
+        "centrifugo": {
+          "condition": "service_started",
+          "required": true
+        },
+        "mongodb": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "deploy": {
+        "resources": {
+          "limits": {
+            "cpus": 0.75,
+            "memory": "268435456"
+          }
+        },
+        "placement": {}
+      },
+      "entrypoint": null,
+      "environment": {
+        "ADAPTER_INTERNAL_TOKEN_FILE": "/run/secrets/adapter_internal_token",
+        "ASPNETCORE_URLS": "http://+:8080",
+        "CENTRIFUGO_API_KEY_FILE": "/run/secrets/centrifugo_api_key",
+        "Centrifugo__PublishUrl": "http://centrifugo:8000/api/publish",
+        "Harness__AllowedHosts": "cursor-harness,codex-harness",
+        "Harness__CaFile": "/etc/ssl/certs/hl304-harness.crt",
+        "MONGODB_CONNECTION_STRING_FILE": "/run/secrets/mongodb_connection_string",
+        "Mongo__Database": "harness_adapter"
+      },
+      "image": "${DEV_IMAGE_ADAPTER}",
+      "networks": {
+        "harness": null,
+        "internal": null
+      },
+      "restart": "unless-stopped",
+      "secrets": [
+        {
+          "source": "mongodb_connection_string",
+          "target": "/run/secrets/mongodb_connection_string"
+        },
+        {
+          "source": "adapter_internal_token",
+          "target": "/run/secrets/adapter_internal_token"
+        },
+        {
+          "source": "centrifugo_api_key",
+          "target": "/run/secrets/centrifugo_api_key"
+        }
+      ],
+      "labels": {
+        "homelab.environment": "harness-dev"
+      }
+    },
+    "centrifugo": {
+      "command": null,
+      "configs": [
+        {
+          "source": "centrifugo_start",
+          "target": "/centrifugo/bootstrap/start.sh",
+          "mode": "0555"
+        }
+      ],
+      "deploy": {
+        "resources": {
+          "limits": {
+            "cpus": 0.5,
+            "memory": "134217728"
+          }
+        },
+        "placement": {}
+      },
+      "entrypoint": [
+        "/bin/sh",
+        "/centrifugo/bootstrap/start.sh"
+      ],
+      "environment": {
+        "WEB_ORIGIN": "http://localhost:18707"
+      },
+      "image": "${DEV_IMAGE_CENTRIFUGO}",
+      "networks": {
+        "internal": null
+      },
+      "restart": "unless-stopped",
+      "secrets": [
+        {
+          "source": "centrifugo_client_secret",
+          "target": "/run/secrets/centrifugo_client_secret"
+        },
+        {
+          "source": "centrifugo_api_key",
+          "target": "/run/secrets/centrifugo_api_key"
+        }
+      ],
+      "labels": {
+        "homelab.environment": "harness-dev"
+      }
+    },
+    "client": {
+      "command": null,
+      "configs": [
+        {
+          "source": "client_runtime",
+          "target": "/usr/share/nginx/html/runtime-config.js"
+        }
+      ],
+      "depends_on": {
+        "centrifugo": {
+          "condition": "service_started",
+          "required": true
+        },
+        "gateway": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "deploy": {
+        "resources": {
+          "limits": {
+            "cpus": 0.5,
+            "memory": "134217728"
+          }
+        },
+        "placement": {}
+      },
+      "entrypoint": null,
+      "image": "${DEV_IMAGE_CLIENT}",
+      "networks": {
+        "internal": null,
+        "web": null
+      },
+      "ports": [
+        {
+          "mode": "ingress",
+          "host_ip": "127.0.0.1",
+          "target": 8080,
+          "published": "18707",
+          "protocol": "tcp"
+        }
+      ],
+      "restart": "unless-stopped",
+      "labels": {
+        "homelab.environment": "harness-dev"
+      }
+    },
+    "codex-harness": {
+      "cap_add": [
+        "CHOWN",
+        "SETUID",
+        "SETGID",
+        "DAC_OVERRIDE",
+        "FOWNER"
+      ],
+      "cap_drop": [
+        "ALL"
+      ],
+      "command": [
+        "install -d -o 10001 -g 10001 -m 0700 /state/private /state/harness /state/codex /state/codex/home /provider-auth /provider-auth/codex-home /workspace; install -o 10001 -g 10001 -m 0600 /run/secrets/harness_server_key /state/private/server.key; install -o 10001 -g 10001 -m 0644 /run/config/harness_server_cert /state/private/server.crt; exec setpriv --reuid=10001 --regid=10001 --clear-groups /harness-node --config /config/node.json"
+      ],
+      "configs": [
+        {
+          "source": "codex_node_config",
+          "target": "/config/node.json"
+        },
+        {
+          "source": "harness_policy",
+          "target": "/config/policy.txt"
+        },
+        {
+          "source": "harness_server_cert",
+          "target": "/run/config/harness_server_cert"
+        },
+        {
+          "source": "codex_tools",
+          "target": "/config/tools-explicit.json"
+        },
+        {
+          "source": "test_workspace_marker",
+          "target": "/workspace/hl307-test.txt"
+        }
+      ],
+      "deploy": {
+        "resources": {
+          "limits": {
+            "cpus": 1,
+            "memory": "536870912",
+            "pids": 256
+          }
+        },
+        "placement": {}
+      },
+      "entrypoint": [
+        "/bin/sh",
+        "-ec"
+      ],
+      "image": "${DEV_IMAGE_CODEX_HARNESS}",
+      "networks": {
+        "harness": null,
+        "provider-egress": null
+      },
+      "pids_limit": 256,
+      "read_only": true,
+      "restart": "unless-stopped",
+      "secrets": [
+        {
+          "source": "harness_server_key",
+          "target": "/run/secrets/harness_server_key"
+        }
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "tmpfs": [
+        "/tmp:rw,noexec,nosuid,size=67108864,uid=10001,gid=10001,mode=0700"
+      ],
+      "user": "0:0",
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "codex-harness-data",
+          "target": "/state",
+          "volume": {}
+        },
+        {
+          "type": "volume",
+          "source": "codex-provider-auth",
+          "target": "/provider-auth",
+          "volume": {}
+        },
+        {
+          "type": "volume",
+          "source": "codex-workspace",
+          "target": "/workspace",
+          "volume": {}
+        }
+      ],
+      "labels": {
+        "homelab.environment": "harness-dev"
+      }
+    },
+    "cursor-harness": {
+      "cap_add": [
+        "CHOWN",
+        "SETUID",
+        "SETGID",
+        "DAC_OVERRIDE",
+        "FOWNER"
+      ],
+      "cap_drop": [
+        "ALL"
+      ],
+      "command": [
+        "install -d -o 10001 -g 10001 -m 0700 /state/private /state/harness /state/cursor /state/cursor/home /provider-auth /workspace; install -o 10001 -g 10001 -m 0600 /run/secrets/harness_server_key /state/private/server.key; install -o 10001 -g 10001 -m 0644 /run/config/harness_server_cert /state/private/server.crt; exec setpriv --reuid=10001 --regid=10001 --clear-groups /harness-node --config /config/node.json"
+      ],
+      "configs": [
+        {
+          "source": "cursor_node_config",
+          "target": "/config/node.json"
+        },
+        {
+          "source": "harness_policy",
+          "target": "/config/policy.txt"
+        },
+        {
+          "source": "harness_server_cert",
+          "target": "/run/config/harness_server_cert"
+        },
+        {
+          "source": "cursor_tools",
+          "target": "/config/tools-explicit.json"
+        },
+        {
+          "source": "test_workspace_marker",
+          "target": "/workspace/hl307-test.txt"
+        }
+      ],
+      "deploy": {
+        "resources": {
+          "limits": {
+            "cpus": 1,
+            "memory": "536870912",
+            "pids": 256
+          }
+        },
+        "placement": {}
+      },
+      "entrypoint": [
+        "/bin/sh",
+        "-ec"
+      ],
+      "image": "${DEV_IMAGE_CURSOR_HARNESS}",
+      "networks": {
+        "harness": null,
+        "provider-egress": null
+      },
+      "pids_limit": 256,
+      "read_only": true,
+      "restart": "unless-stopped",
+      "secrets": [
+        {
+          "source": "harness_server_key",
+          "target": "/run/secrets/harness_server_key"
+        }
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "tmpfs": [
+        "/tmp:rw,noexec,nosuid,size=67108864,uid=10001,gid=10001,mode=0700"
+      ],
+      "user": "0:0",
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "cursor-harness-data",
+          "target": "/state",
+          "volume": {}
+        },
+        {
+          "type": "volume",
+          "source": "cursor-provider-auth",
+          "target": "/provider-auth",
+          "volume": {}
+        },
+        {
+          "type": "volume",
+          "source": "cursor-workspace",
+          "target": "/workspace",
+          "volume": {}
+        }
+      ],
+      "labels": {
+        "homelab.environment": "harness-dev"
+      }
+    },
+    "gateway": {
+      "command": null,
+      "depends_on": {
+        "adapter": {
+          "condition": "service_started",
+          "required": true
+        },
+        "keycloak": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "deploy": {
+        "resources": {
+          "limits": {
+            "cpus": 0.75,
+            "memory": "268435456"
+          }
+        },
+        "placement": {}
+      },
+      "entrypoint": null,
+      "environment": {
+        "ADAPTER_BASE_URL": "http://adapter:8080/",
+        "ADAPTER_INTERNAL_TOKEN_FILE": "/run/secrets/adapter_internal_token",
+        "ASPNETCORE_URLS": "http://+:8080",
+        "CENTRIFUGO_CLIENT_TOKEN_SECRET_FILE": "/run/secrets/centrifugo_client_secret",
+        "OIDC_AUDIENCE": "harness-web",
+        "OIDC_ISSUER": "http://localhost:18787/realms/harness",
+        "OIDC_METADATA_ADDRESS": "http://keycloak:8080/realms/harness/.well-known/openid-configuration"
+      },
+      "image": "${DEV_IMAGE_GATEWAY}",
+      "networks": {
+        "internal": null
+      },
+      "restart": "unless-stopped",
+      "secrets": [
+        {
+          "source": "adapter_internal_token",
+          "target": "/run/secrets/adapter_internal_token"
+        },
+        {
+          "source": "centrifugo_client_secret",
+          "target": "/run/secrets/centrifugo_client_secret"
+        }
+      ],
+      "labels": {
+        "homelab.environment": "harness-dev"
+      }
+    },
+    "keycloak": {
+      "command": [
+        "start-dev",
+        "--import-realm"
+      ],
+      "configs": [
+        {
+          "source": "keycloak_start",
+          "target": "/opt/keycloak/bootstrap/start.sh",
+          "mode": "0555"
+        },
+        {
+          "source": "keycloak_realm",
+          "target": "/opt/keycloak/data/import/harness-realm.json"
+        }
+      ],
+      "deploy": {
+        "resources": {
+          "limits": {
+            "cpus": 1,
+            "memory": "805306368"
+          }
+        },
+        "placement": {}
+      },
+      "entrypoint": [
+        "/bin/sh",
+        "/opt/keycloak/bootstrap/start.sh"
+      ],
+      "environment": {
+        "DEV_USER_USERNAME": "operator",
+        "KC_BOOTSTRAP_ADMIN_USERNAME": "admin",
+        "KC_HEALTH_ENABLED": "true",
+        "KC_HTTP_ENABLED": "true",
+        "WEB_ORIGIN": "http://localhost:18707"
+      },
+      "image": "${DEV_IMAGE_KEYCLOAK}",
+      "networks": {
+        "internal": null,
+        "web": null
+      },
+      "ports": [
+        {
+          "mode": "ingress",
+          "host_ip": "127.0.0.1",
+          "target": 8080,
+          "published": "18787",
+          "protocol": "tcp"
+        }
+      ],
+      "restart": "unless-stopped",
+      "secrets": [
+        {
+          "source": "keycloak_admin_password",
+          "target": "/run/secrets/keycloak_admin_password"
+        },
+        {
+          "source": "keycloak_dev_user_password",
+          "target": "/run/secrets/keycloak_dev_user_password"
+        },
+        {
+          "source": "keycloak_dev_viewer_password",
+          "target": "/run/secrets/keycloak_dev_viewer_password"
+        }
+      ],
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "keycloak-data",
+          "target": "/opt/keycloak/data",
+          "volume": {}
+        }
+      ],
+      "labels": {
+        "homelab.environment": "harness-dev"
+      }
+    },
+    "mongodb": {
+      "command": [
+        "mongod",
+        "--bind_ip_all",
+        "--auth"
+      ],
+      "deploy": {
+        "resources": {
+          "limits": {
+            "cpus": 1,
+            "memory": "536870912"
+          }
+        },
+        "placement": {}
+      },
+      "entrypoint": null,
+      "environment": {
+        "MONGO_INITDB_ROOT_PASSWORD_FILE": "/run/secrets/mongodb_root_password",
+        "MONGO_INITDB_ROOT_USERNAME_FILE": "/run/secrets/mongodb_root_username"
+      },
+      "image": "${DEV_IMAGE_MONGODB}",
+      "networks": {
+        "internal": null
+      },
+      "restart": "unless-stopped",
+      "secrets": [
+        {
+          "source": "mongodb_root_username",
+          "target": "/run/secrets/mongodb_root_username"
+        },
+        {
+          "source": "mongodb_root_password",
+          "target": "/run/secrets/mongodb_root_password"
+        }
+      ],
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "mongodb-data",
+          "target": "/data/db",
+          "volume": {}
+        }
+      ],
+      "labels": {
+        "homelab.environment": "harness-dev"
+      }
+    }
+  },
+  "volumes": {
+    "codex-harness-data": {
+      "external": true,
+      "name": "${DEV_VOLUME_CODEX_HARNESS_DATA}"
+    },
+    "codex-provider-auth": {
+      "external": true,
+      "name": "${DEV_VOLUME_CODEX_PROVIDER_AUTH}"
+    },
+    "codex-workspace": {
+      "external": true,
+      "name": "${DEV_VOLUME_CODEX_WORKSPACE}"
+    },
+    "cursor-harness-data": {
+      "external": true,
+      "name": "${DEV_VOLUME_CURSOR_HARNESS_DATA}"
+    },
+    "cursor-provider-auth": {
+      "external": true,
+      "name": "${DEV_VOLUME_CURSOR_PROVIDER_AUTH}"
+    },
+    "cursor-workspace": {
+      "external": true,
+      "name": "${DEV_VOLUME_CURSOR_WORKSPACE}"
+    },
+    "keycloak-data": {
+      "external": true,
+      "name": "${DEV_VOLUME_KEYCLOAK_DATA}"
+    },
+    "mongodb-data": {
+      "external": true,
+      "name": "${DEV_VOLUME_MONGODB_DATA}"
+    }
+  }
+}
