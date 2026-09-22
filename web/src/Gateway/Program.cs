@@ -77,16 +77,24 @@ app.MapMethods("/api/connections", ["GET", "POST"], ProxyToAdapter)
 app.MapGet("/api/projections/nodes", (HttpContext context, IHttpClientFactory factory) => ProxyToAdapter(context, factory, "projections/nodes")).RequireAuthorization();
 app.MapGet("/api/projections/work", (HttpContext context, IHttpClientFactory factory) => ProxyToAdapter(context, factory, "projections/work")).RequireAuthorization();
 app.MapGet("/api/projections/history", (HttpContext context, IHttpClientFactory factory) => ProxyToAdapter(context, factory, "projections/history")).RequireAuthorization();
+app.MapMethods("/api/dialogs/{**path}", ["GET", "POST"],
+    (HttpContext context, IHttpClientFactory factory, string path) => ProxyToAdapter(context, factory, $"dialogs/{path}"))
+    .RequireAuthorization();
 
 app.Run();
 
 async Task ProxyToAdapter(HttpContext context, IHttpClientFactory factory, string? path = null)
 {
     var target = string.IsNullOrEmpty(path) ? "api/connections" :
-        path.StartsWith("projections/", StringComparison.Ordinal) ? $"api/{path}" : $"api/connections/{path}";
+        path.StartsWith("projections/", StringComparison.Ordinal) || path.StartsWith("dialogs/", StringComparison.Ordinal)
+            ? $"api/{path}" : $"api/connections/{path}";
+    if (target.StartsWith("api/dialogs/", StringComparison.Ordinal)) context.Response.Headers.CacheControl = "no-store";
     using var request = new HttpRequestMessage(new HttpMethod(context.Request.Method), target + context.Request.QueryString);
+    if (target.StartsWith("api/dialogs/", StringComparison.Ordinal) && HttpMethods.IsPost(context.Request.Method))
+        foreach (var header in new[] { "X-Harness-Expected-Node-ID", "X-Harness-Expected-Registry-Version", "X-Harness-Expected-Identity-Epoch", "X-Harness-Expected-Adapter-Kind", "X-Harness-Expected-Adapter-Version" })
+            if (context.Request.Headers.TryGetValue(header, out var values)) request.Headers.TryAddWithoutValidation(header, values.ToArray());
 
-    if (context.Request.ContentLength is > 0)
+    if (context.Request.ContentLength is > 0 || context.Request.Headers.ContainsKey("Transfer-Encoding"))
     {
         request.Content = new StreamContent(context.Request.Body);
         if (!string.IsNullOrWhiteSpace(context.Request.ContentType))

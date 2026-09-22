@@ -14,6 +14,7 @@
       <aside class="sidebar">
         <div class="brand"><span class="brand-mark" aria-hidden="true">H</span><strong>Harness</strong></div>
         <nav aria-label="Основные разделы">
+          <button data-testid="nav-dialogs" [attr.aria-current]="section()==='dialogs' ? 'page' : null" [class.active]="section()==='dialogs'" (click)="open('dialogs')">Диалоги</button>
           <button data-testid="nav-work" [attr.aria-current]="section()==='work' ? 'page' : null" [class.active]="section()==='work'" (click)="open('work')">Работа</button>
           <button data-testid="nav-history" [attr.aria-current]="section()==='history' ? 'page' : null" [class.active]="section()==='history'" (click)="open('history')">История</button>
           <button data-testid="nav-nodes" [attr.aria-current]="section()==='nodes' ? 'page' : null" [class.active]="section()==='nodes'" (click)="open('nodes')">Ноды</button>
@@ -29,11 +30,12 @@
       <section class="content">
         <header class="page-header">
           <div>
-            <h1>{{ section()==='work' ? 'Работа агентов' : section()==='history' ? 'История обращений' : section()==='nodes' ? 'Ноды' : 'Настройки' }}</h1>
-            <p>{{ section()==='work' ? 'Текущие и ожидающие обращения' : section()==='history' ? 'Завершённые обращения и результаты' : section()==='nodes' ? 'Доступность, здоровье и свежесть' : 'Подключения и наблюдение' }}</p>
+            <h1>{{ section()==='dialogs' ? 'Диалоги' : section()==='work' ? 'Работа агентов' : section()==='history' ? 'История обращений' : section()==='nodes' ? 'Ноды' : 'Настройки' }}</h1>
+            <p>{{ section()==='dialogs' ? 'Сообщения и инструменты агентов' : section()==='work' ? 'Текущие и ожидающие обращения' : section()==='history' ? 'Завершённые обращения и результаты' : section()==='nodes' ? 'Доступность, здоровье и свежесть' : 'Подключения и наблюдение' }}</p>
           </div>
           <button data-testid="refresh-current" type="button" (click)="refreshCurrent()" [disabled]="isLoading(currentResource())">Обновить</button>
         </header>
+        <app-dialogs *ngIf="dialogsOpened()" [hidden]="section()!=='dialogs'" [accessToken]="user()?.access_token || ''" [sessionKey]="dialogSessionKey()" [nodes]="nodes()" [refreshVersion]="dialogsRefreshVersion()" (settingsRequested)="openDialogSettings($event)" (sessionExpired)="dialogSessionExpired()"></app-dialogs>
 
         <section data-testid="screen-work" *ngIf="section()==='work'" class="screen">
           <div class="toolbar" aria-label="Фильтры работы">

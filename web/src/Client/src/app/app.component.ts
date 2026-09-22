@@ -5,6 +5,7 @@ import { FormsModule } from '@angular/forms';
 import { Centrifuge, Subscription } from 'centrifuge';
 import { User, UserManager, WebStorageStateStore } from 'oidc-client-ts';
 import { runtimeConfig } from './runtime-config';
+import { DialogsComponent } from './dialogs/dialogs.component';
 
 interface Observation {
   attemptedAt: string | null;
@@ -146,13 +147,14 @@ interface HistoryRow {
   messages: MessageProjection[];
 }
 
-type Section = 'work' | 'history' | 'nodes' | 'settings';
+type Section = 'work' | 'history' | 'nodes' | 'settings' | 'dialogs';
 type Resource = 'connections' | 'nodes' | 'work' | 'history';
+type RefreshTarget = Resource | 'dialogs';
 
 @Component({
   selector: 'app-root',
   standalone: true,
-  imports: [CommonModule, FormsModule],
+  imports: [CommonModule, FormsModule, DialogsComponent],
   templateUrl: './app.component.html'
 })
 export class AppComponent implements OnInit, OnDestroy {
@@ -170,6 +172,9 @@ export class AppComponent implements OnInit, OnDestroy {
   readonly saveBusy = signal(false);
   readonly authError = signal('');
   readonly clock = signal(Date.now());
+  readonly dialogsRefreshVersion = signal(0);
+  readonly dialogsOpened = signal(false);
+  readonly dialogsSession = signal(sessionStorage.getItem('hl307.web-session') || crypto.randomUUID());
 
   readonly selectedWorkId = signal<string | null>(null);
   readonly selectedHistoryId = signal<string | null>(null);
@@ -193,7 +198,7 @@ export class AppComponent implements OnInit, OnDestroy {
   private hadRealtimeDisconnect = false;
   private readonly inFlight = new Set<Resource>();
   private readonly pending = new Set<Resource>();
-  private readonly queuedResources = new Set<Resource>();
+  private readonly queuedResources = new Set<RefreshTarget>();
   private readonly users = new UserManager({
     authority: runtimeConfig.oidcAuthority,
     client_id: runtimeConfig.oidcClientId,
@@ -212,8 +217,11 @@ export class AppComponent implements OnInit, OnDestroy {
     try {
       if (location.pathname === '/auth/callback') {
         await this.users.signinRedirectCallback();
+        this.clearDialogPending();
+        this.dialogsSession.set(crypto.randomUUID());
         history.replaceState({}, '', '/');
       }
+      sessionStorage.setItem('hl307.web-session', this.dialogsSession());
       this.user.set(await this.users.getUser());
       if (this.user()?.expired) {
         await this.users.removeUser();
@@ -240,9 +248,28 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   login(): Promise<void> { return this.users.signinRedirect(); }
-  logout(): Promise<void> { return this.users.signoutRedirect(); }
+  logout(): Promise<void> {
+    this.clearDialogPending();
+    sessionStorage.removeItem('hl307.web-session');
+    return this.users.signoutRedirect();
+  }
+
+  dialogSessionKey(): string { return `${this.user()?.profile.sub ?? ''}:${this.dialogsSession()}`; }
+  private clearDialogPending(): void {
+    for (const key of Object.keys(sessionStorage)) if (key.startsWith('hl307:pending:')) sessionStorage.removeItem(key);
+  }
+  dialogSessionExpired(): void {
+    this.authError.set('Сессия истекла. Войдите снова.');
+    this.user.set(null);
+  }
+  openDialogSettings(connectionId: string): void {
+    this.open('settings');
+    const connection = this.connectionFor(connectionId);
+    if (connection) this.selectConnection(connection);
+  }
 
   open(section: Section): void {
+    if (section === 'dialogs') this.dialogsOpened.set(true);
     this.section.set(section);
     this.notice.set('');
     this.refreshCurrent();
@@ -251,10 +278,14 @@ export class AppComponent implements OnInit, OnDestroy {
   refreshCurrent(): void {
     const section = this.section();
     if (section === 'settings') this.loadConnections();
+    else if (section === 'dialogs') {
+      this.loadProjection('nodes', false);
+      this.dialogsRefreshVersion.update(value => value + 1);
+    }
     else this.loadProjection(section);
   }
 
-  currentResource(): Resource {
+  currentResource(): RefreshTarget {
     const current = this.section();
     return current === 'settings' ? 'connections' : current;
   }
@@ -543,7 +574,7 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   connectionFor(connectionId: string): Connection | undefined { return this.connections().find(item => item.id === connectionId); }
-  isLoading(resource: Resource): boolean { return this.loadingResources()[resource]; }
+  isLoading(resource: RefreshTarget): boolean { return resource === 'dialogs' ? false : this.loadingResources()[resource]; }
   errorFor(resource: Resource): string { return this.resourceErrors()[resource]; }
   trackConnection(_: number, item: Connection): string { return item.id; }
   trackNode(_: number, item: NodeProjection): string { return item.connectionId; }
@@ -664,6 +695,11 @@ export class AppComponent implements OnInit, OnDestroy {
       this.subscription.on('publication', event => {
         const resource = this.invalidationResource(event.data);
         const visible = this.currentResource();
+        if (visible === 'dialogs') {
+          this.queueRefresh('dialogs');
+          if (resource === 'nodes' || resource === 'connections') this.queueRefresh('nodes');
+          return;
+        }
         if (resource === 'nodes' && visible === 'connections')
           this.queueRefresh('connections');
         else if (resource === null || resource === visible || resource === 'connections')
@@ -676,7 +712,7 @@ export class AppComponent implements OnInit, OnDestroy {
     }
   }
 
-  private queueRefresh(resource: Resource): void {
+  private queueRefresh(resource: RefreshTarget): void {
     this.queuedResources.add(resource);
     if (this.refreshTimer) return;
     this.refreshTimer = window.setTimeout(() => {
@@ -684,7 +720,8 @@ export class AppComponent implements OnInit, OnDestroy {
       const resources = [...this.queuedResources];
       this.queuedResources.clear();
       for (const queued of resources) {
-        if (queued === 'connections') this.loadConnections(false);
+        if (queued === 'dialogs') this.dialogsRefreshVersion.update(value => value + 1);
+        else if (queued === 'connections') this.loadConnections(false);
         else this.loadProjection(queued, false);
       }
     }, 180);

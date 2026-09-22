@@ -10,7 +10,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-if ($ProjectName -notmatch '^hl305-[a-z0-9-]+$') { throw 'Use a dedicated hl305-* project for acceptance.' }
+if ($ProjectName -notmatch '^hl(?:305|307)-[a-z0-9-]+$') { throw 'Use a dedicated hl305-* or hl307-* project for acceptance.' }
 if ($ClientPort -lt 1024 -or $ClientPort -gt 65535 -or $KeycloakPort -lt 1024 -or $KeycloakPort -gt 65535) { throw 'Use unprivileged valid TCP ports.' }
 if ($ClientPort -eq 18100 -or $KeycloakPort -eq 18180 -or $ClientPort -eq $KeycloakPort) { throw 'Acceptance ports must differ from the working stack.' }
 & (Join-Path $PSScriptRoot 'assert-isolated-owner.ps1') -ProjectName $ProjectName -ProjectRoot $root

@@ -1,0 +1,397 @@
+<section class="dialogs-screen" data-testid="screen-dialogs" aria-labelledby="dialogs-heading">
+  <h2 id="dialogs-heading" class="sr-only">Диалоги</h2>
+
+  @if (actionError()) {
+    <p class="notice error" role="alert">{{ actionError() }}</p>
+  }
+  @if (actionNotice()) {
+    <p class="notice success" role="status">{{ actionNotice() }}</p>
+  }
+  @for (pending of pendingCommands(); track pending.commandId) {
+    <div class="pending-command" [attr.data-testid]="'pending-command-' + pending.commandId" role="status">
+      <span><strong>Исход команды неизвестен.</strong> {{ pending.kind === 'dialog.create' ? 'Создание диалога' : 'Отправка сообщения' }} не повторяется автоматически.</span>
+      <button
+        type="button"
+        data-testid="reconcile-command"
+        (click)="reconcilePending(pending)"
+        [disabled]="!!reconcilingCommandId()">
+        {{ reconcilingCommandId() === pending.commandId ? 'Проверяется…' : 'Проверить квитанцию' }}
+      </button>
+    </div>
+  }
+
+  <div class="dialogs-grid">
+    <aside class="dialog-list" aria-label="Список диалогов">
+      <div class="create-dialog" data-testid="new-dialog">
+        <div class="create-title">
+          <strong>Новый диалог</strong>
+          <span>Нода выбирается явно</span>
+        </div>
+        <label for="new-dialog-node">Нода</label>
+        <select
+          id="new-dialog-node"
+          data-testid="new-dialog-node"
+          [(ngModel)]="createNodeConnectionId">
+          @for (node of selectableNodes(); track node.connectionId) {
+            <option [value]="node.connectionId">{{ node.name || node.observation.nodeId }}</option>
+          }
+        </select>
+        <label for="new-dialog-title">Название <span>(необязательно)</span></label>
+        <input
+          id="new-dialog-title"
+          data-testid="new-dialog-title"
+          type="text"
+          maxlength="200"
+          [(ngModel)]="createTitle"
+          placeholder="Например, проверка окружения">
+        <button
+          type="button"
+          class="primary"
+          data-testid="create-dialog"
+          (click)="createDialog()"
+          [disabled]="creating() || !canCreate()"
+          [attr.title]="canCreate() ? null : createDisabledReason()">
+          {{ creating() ? 'Создаётся…' : 'Создать' }}
+        </button>
+        @if (!canCreate() && createNodeConnectionId) {
+          <p class="disabled-reason">
+            {{ createDisabledReason() }}
+            <button type="button" class="text-button" (click)="openSettings(createNodeConnectionId)">Настройки ноды</button>
+          </p>
+        }
+      </div>
+
+      <div class="list-filters">
+        <label class="search-label" for="dialogs-search">Поиск</label>
+        <input
+          id="dialogs-search"
+          data-testid="dialogs-search"
+          type="search"
+          [(ngModel)]="dialogQuery"
+          placeholder="Название или ID">
+        <div class="filter-pair">
+          <label>
+            <span>Нода</span>
+            <select data-testid="dialogs-node-filter" [(ngModel)]="nodeFilter">
+              <option value="all">Все</option>
+              @for (node of selectableNodes(); track node.connectionId) {
+                <option [value]="node.connectionId">{{ node.name || node.observation.nodeId }}</option>
+              }
+            </select>
+          </label>
+          <label>
+            <span>Состояние</span>
+            <select [(ngModel)]="stateFilter">
+              <option value="all">Все</option>
+              <option value="active">Выполняется</option>
+              <option value="queued">В очереди</option>
+              <option value="dispatching">Назначается</option>
+              <option value="idle">Сохранён</option>
+              <option value="cancelled">Отменён</option>
+              <option value="completed">Завершён</option>
+              <option value="failed">Ошибка</option>
+              <option value="interrupted">Прерван</option>
+              <option value="unknown">Исход неизвестен</option>
+              <option value="unavailable">Нода недоступна</option>
+            </select>
+          </label>
+        </div>
+      </div>
+
+      @if (listError()) {
+        <p class="pane-error" role="alert">{{ listError() }}</p>
+      }
+      @if (listLoading() && !dialogs().length) {
+        <p class="pane-status">Загрузка диалогов…</p>
+      } @else if (!filteredDialogs().length) {
+        <div class="empty compact-empty">
+          <strong>Диалогов нет</strong>
+          <span>Создайте диалог на готовой ноде или измените фильтры.</span>
+        </div>
+      } @else {
+        <div class="dialog-rows">
+          @for (dialog of filteredDialogs(); track dialog.nodeId + ':' + dialog.dialogId) {
+            <button
+              type="button"
+              class="dialog-row"
+              [class.selected]="isDialogSelected(dialog)"
+              [attr.aria-current]="isDialogSelected(dialog) ? 'true' : null"
+              [attr.data-testid]="'dialog-row-' + dialog.dialogId"
+              (click)="selectDialog(dialog)">
+              <span class="dialog-row-main">
+                <strong>{{ dialog.title || 'Диалог без названия' }}</strong>
+                <small>{{ dialog.nodeName }} · {{ shortId(dialog.dialogId) }}</small>
+              </span>
+              <span class="dialog-row-meta">
+                <span class="status" [class]="'status ' + stateClass(dialog.activity)">{{ dialogStateLabel(dialog.activity) }}</span>
+                <time [attr.datetime]="dialog.lastActivityAt">{{ formatTime(dialog.lastActivityAt) }}</time>
+              </span>
+            </button>
+          }
+        </div>
+      }
+      <div class="list-foot">
+        <span>{{ filteredDialogs().length }} из {{ dialogs().length }}</span>
+        @if (hasMoreDialogs()) {
+          <button type="button" class="text-button" (click)="loadMoreDialogs()">Ещё диалоги</button>
+        }
+      </div>
+    </aside>
+
+    <section class="conversation" aria-label="История диалога">
+      @if (selectedDialog(); as dialog) {
+        <header class="conversation-head">
+          <div>
+            <h3>{{ dialog.title || 'Диалог без названия' }}</h3>
+            <p>{{ dialog.nodeName }} · <span class="mono">{{ shortId(dialog.dialogId) }}</span></p>
+          </div>
+          <span class="status" [class]="'status ' + stateClass(dialog.activity)">{{ dialogStateLabel(dialog.activity) }}</span>
+        </header>
+
+        @if (historyError()) {
+          <div class="read-error" role="alert">
+            <span>{{ historyError() }}</span>
+            <button type="button" (click)="refreshSelectedDialog(true)">Повторить чтение</button>
+          </div>
+        }
+
+        <div
+          #historyViewport
+          class="messages"
+          data-testid="messages-scroll"
+          tabindex="0"
+          aria-label="Сообщения диалога"
+          (scroll)="onHistoryScroll()">
+          @if (historyNextCursor()) {
+            <button
+              type="button"
+              class="load-older"
+              data-testid="load-older-messages"
+              (click)="loadOlderMessages()"
+              [disabled]="historyLoadingOlder()">
+              {{ historyLoadingOlder() ? 'Загружаются…' : 'Загрузить более ранние сообщения' }}
+            </button>
+          }
+          @if (historyLoading() && !messages().length) {
+            <p class="pane-status">Загрузка истории…</p>
+          } @else if (!messages().length) {
+            <div class="empty history-empty">
+              <strong>История пока пуста</strong>
+              <span>Первое сообщение начнёт обращение к выбранной ноде.</span>
+            </div>
+          }
+          @for (message of messages(); track message.messageId) {
+            <article
+              class="message"
+              [class.user-message]="message.role === 'user'"
+              [class.assistant-message]="message.role === 'assistant'"
+              [attr.data-testid]="'message-' + message.messageId">
+              <header>
+                <strong>{{ message.role === 'user' ? 'Вы' : 'Harness' }}</strong>
+                @if (message.role === 'user') {
+                  <button type="button" class="message-context" (click)="selectMessageRequest(message)">
+                    {{ requestStatusLabel(message.disposition) }}
+                  </button>
+                }
+                <time [attr.datetime]="message.createdAt">{{ formatTime(message.createdAt) }}</time>
+              </header>
+              @for (block of messageBlocks(message); track $index) {
+                @if (block.kind === 'code') {
+                  <div class="code-block">
+                    @if (block.language) { <span>{{ block.language }}</span> }
+                    <pre><code>{{ block.text }}</code></pre>
+                  </div>
+                } @else {
+                  <p class="message-text">{{ block.text }}</p>
+                }
+              }
+              @if (message.role === 'assistant' && message.content.kind !== 'inline') {
+                <div class="content-reference">
+                  <strong>{{ message.content.kind === 'artifact' ? 'Ответ сохранён как артефакт' : 'Ответ недоступен' }}</strong>
+                  <span>{{ safeContentText(message.content) }}</span>
+                </div>
+              }
+              @if (message.role === 'assistant' && safeContentNote(message.content)) {
+                <p class="content-note">{{ safeContentNote(message.content) }}</p>
+              }
+            </article>
+          }
+        </div>
+
+        @if (newMessageCount()) {
+          <button type="button" class="new-messages" (click)="revealNewMessages()">
+            Новые сообщения: {{ newMessageCount() }}
+          </button>
+        }
+
+        <div class="composer">
+          <label for="message-input">Сообщение</label>
+          <textarea
+            id="message-input"
+            data-testid="message-input"
+            rows="4"
+            maxlength="16000"
+            [(ngModel)]="draft"
+            (keydown)="onDraftKeydown($event)"
+            placeholder="Введите сообщение. Ctrl/Cmd+Enter — отправить"></textarea>
+          <div class="composer-foot">
+            <span class="format-hint">Блоки кода: ```; остальное — обычный текст.</span>
+            <span [class.error-text]="draft.length > 16000">{{ draft.length.toLocaleString('ru-RU') }} / 16 000</span>
+            <button
+              type="button"
+              class="primary"
+              data-testid="send-message"
+              (click)="sendMessage()"
+              [disabled]="sending() || !draft.trim() || !canWriteSelected()"
+              [attr.title]="canWriteSelected() ? null : sendDisabledReason()">
+              {{ sending() ? 'Отправляется…' : 'Отправить' }}
+            </button>
+          </div>
+          @if (!canWriteSelected()) {
+            <p class="disabled-reason">
+              {{ sendDisabledReason() }}
+              <button type="button" class="text-button" (click)="openSettings(dialog.connectionId)">Настройки ноды</button>
+            </p>
+          }
+        </div>
+      } @else {
+        <div class="empty conversation-empty">
+          <strong>Выберите диалог</strong>
+          <span>История и поле сообщения появятся здесь.</span>
+        </div>
+      }
+    </section>
+
+    <aside class="context-pane" aria-label="Запросы и инструменты">
+      <header class="context-head">
+        <div>
+          <h3>Контекст выполнения</h3>
+          <p>Запросы, попытки и вызовы инструментов</p>
+        </div>
+        @if (freshnessAt()) {
+          <time [attr.datetime]="freshnessAt()!" title="Время последнего успешного чтения">{{ formatTime(freshnessAt()) }}</time>
+        }
+      </header>
+
+      @if (contextError()) {
+        <p class="pane-error" role="alert">{{ contextError() }}</p>
+      }
+      @if (!selectedDialog()) {
+        <div class="empty compact-empty"><span>Сначала выберите диалог.</span></div>
+      } @else {
+        <section class="context-section">
+          <h4>Запросы <span>{{ requests().length }}</span></h4>
+          @if (!requests().length && !historyLoading()) {
+            <p class="context-empty">Запросов пока нет.</p>
+          }
+          <div class="context-list">
+            @for (request of requests(); track request.requestId) {
+              <button
+                type="button"
+                [class.selected]="selectedRequestId() === request.requestId"
+                (click)="selectRequest(request)">
+                <span>
+                  <strong>#{{ request.queueSequence }}</strong>
+                  <small class="mono">{{ shortId(request.requestId) }}</small>
+                </span>
+                <span class="status" [class]="'status ' + stateClass(request.status)">{{ requestStatusLabel(request.status) }}</span>
+              </button>
+            }
+          </div>
+          @if (requestNextCursor()) {
+            <button type="button" class="context-more" (click)="loadMoreRequests()" [disabled]="contextLoading()">Ещё запросы</button>
+          }
+        </section>
+
+        @if (selectedRequest()) {
+          <section class="context-section">
+            <h4>Попытки <span>{{ attempts().length }}</span></h4>
+            @if (contextLoading()) { <p class="context-empty">Загрузка попыток…</p> }
+            <div class="context-list">
+              @for (attempt of attempts(); track attempt.attemptId) {
+                <button
+                  type="button"
+                  [class.selected]="selectedAttemptId() === attempt.attemptId"
+                  (click)="selectAttempt(attempt)">
+                  <span>
+                    <strong>Попытка {{ attempt.generation }}</strong>
+                    <small>{{ attempt.startedAt ? formatTime(attempt.startedAt) : 'Ещё не начата' }}</small>
+                  </span>
+                  <span class="status" [class]="'status ' + stateClass(attempt.state)">{{ requestStatusLabel(attempt.state) }}</span>
+                </button>
+              }
+            </div>
+            @if (attemptNextCursor()) {
+              <button type="button" class="context-more" (click)="loadMoreAttempts()" [disabled]="contextLoading()">Ещё попытки</button>
+            }
+          </section>
+        }
+
+        @if (selectedAttempt()) {
+          <section class="context-section tools-section">
+            <h4>Инструменты <span>{{ toolCalls().length }}</span></h4>
+            @if (toolLoading() && !toolCalls().length) { <p class="context-empty">Загрузка инструментов…</p> }
+            @if (!toolLoading() && !toolCalls().length) { <p class="context-empty">Вызовов инструментов нет.</p> }
+            <div class="tool-list">
+              @for (tool of toolCalls(); track tool.toolCallId) {
+                <button
+                  type="button"
+                  [class.selected]="selectedToolCallId() === tool.toolCallId"
+                  [attr.data-testid]="'tool-call-' + tool.toolCallId"
+                  (click)="selectToolCall(tool)">
+                  <span>
+                    <strong>{{ tool.toolName }}</strong>
+                    <small>{{ toolTimingLabel(tool) }}</small>
+                  </span>
+                  <span class="status" [class]="'status ' + stateClass(tool.state)">{{ requestStatusLabel(tool.state) }}</span>
+                </button>
+              }
+            </div>
+            @if (toolNextCursor()) {
+              <button type="button" class="context-more" (click)="loadMoreToolCalls()" [disabled]="toolLoading()">Ещё вызовы</button>
+            }
+          </section>
+        }
+
+        @if (toolDetail(); as detail) {
+          <section class="tool-details" data-testid="tool-details">
+            <header>
+              <div>
+                <span class="section-label">Вызов инструмента</span>
+                <h4>{{ detail.toolName }}</h4>
+                <small class="tool-timing">{{ toolTimingLabel(detail) }}</small>
+              </div>
+              <span class="status" [class]="'status ' + stateClass(detail.state)">{{ requestStatusLabel(detail.state) }}</span>
+            </header>
+            <details open>
+              <summary>Аргументы</summary>
+              <pre>{{ safeContentText(detail.input) }}</pre>
+              @if (safeContentNote(detail.input)) { <p class="content-note">{{ safeContentNote(detail.input) }}</p> }
+            </details>
+            @if (detail.result) {
+              <details open>
+                <summary>Результат</summary>
+                <pre>{{ safeContentText(detail.result) }}</pre>
+                @if (safeContentNote(detail.result)) { <p class="content-note">{{ safeContentNote(detail.result) }}</p> }
+              </details>
+            }
+            @if (detail.outputs.length) {
+              <details>
+                <summary>Поток вывода · {{ detail.outputs.length }}</summary>
+                @for (output of detail.outputs; track output.index) {
+                  <div class="tool-output">
+                    <span>{{ output.stream }} · {{ formatTime(output.observedAt) }}</span>
+                    <pre>{{ safeContentText(output.content) }}</pre>
+                  </div>
+                }
+                @if (detail.nextOutputCursor) {
+                  <button type="button" (click)="loadMoreToolOutputs()" [disabled]="toolLoading()">Загрузить ещё вывод</button>
+                }
+              </details>
+            }
+          </section>
+        }
+      }
+    </aside>
+  </div>
+</section>

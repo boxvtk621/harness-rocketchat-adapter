@@ -16,6 +16,8 @@ builder.Services.AddOptions<HarnessOptions>().BindConfiguration("Harness").Valid
 builder.Services.AddSingleton<IMongoClient>(sp => new MongoClient(sp.GetRequiredService<IOptions<MongoOptions>>().Value.ConnectionString));
 builder.Services.AddSingleton<IConnectionRepository, MongoConnectionRepository>();
 builder.Services.AddSingleton<HarnessAddressPolicy>();
+builder.Services.AddDialogServices();
+builder.Logging.AddFilter("System.Net.Http.HttpClient.IDialogHarnessClient", LogLevel.Warning);
 builder.Services.AddHttpClient<IHarnessClient, HarnessClient>(client =>
 {
     client.Timeout = Timeout.InfiniteTimeSpan;
@@ -123,6 +125,7 @@ projections.MapGet("/history", async (IConnectionRepository store, IHarnessClien
     catch (ProjectionUnavailableException) { return Results.StatusCode(StatusCodes.Status503ServiceUnavailable); }
 });
 
+app.MapDialogs();
 app.Run();
 
 void LoadSecret(string configurationKey, string fileSetting)
