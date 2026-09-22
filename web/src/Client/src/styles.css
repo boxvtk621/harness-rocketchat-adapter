@@ -121,6 +121,10 @@ tbody tr:not(.group-row):hover, tbody tr.selected { background: var(--selected);
 .banner { margin: var(--space-2) var(--space-3); padding: 6px var(--space-2); border: 1px solid; border-radius: var(--radius); }
 .banner.error { border-color: #e3b8b2; background: var(--danger-bg); color: var(--danger); }
 .banner.notice { border-color: #bdd6c2; background: var(--positive-bg); color: var(--positive); }
+.provider-auth { border-top: 1px solid var(--line); padding-top: 12px; margin-top: 16px; }
+.provider-auth .actions { flex-wrap: wrap; }
+.provider-auth a { overflow-wrap: anywhere; }
+.device-code { display: inline-block; padding: 6px 10px; border: 1px solid var(--line); font-size: 1.15rem; letter-spacing: .12em; user-select: all; }
 .banner.compact { margin: var(--space-3) 0; }
 .error { color: var(--danger); }
 .panel-title { display: flex; min-height: 48px; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--line); }

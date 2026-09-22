@@ -5,6 +5,7 @@ import { FormsModule } from '@angular/forms';
 import { Centrifuge, Subscription } from 'centrifuge';
 import { User, UserManager, WebStorageStateStore } from 'oidc-client-ts';
 import { runtimeConfig } from './runtime-config';
+import { ProviderAuthComponent } from './provider-auth.component';
 
 interface Observation {
   attemptedAt: string | null;
@@ -152,13 +153,14 @@ type Resource = 'connections' | 'nodes' | 'work' | 'history';
 @Component({
   selector: 'app-root',
   standalone: true,
-  imports: [CommonModule, FormsModule],
+  imports: [CommonModule, FormsModule, ProviderAuthComponent],
   templateUrl: './app.component.html'
 })
 export class AppComponent implements OnInit, OnDestroy {
   readonly section = signal<Section>('work');
   readonly user = signal<User | null>(null);
   readonly authReady = signal(false);
+  readonly canManageConnections = signal(false);
   readonly notice = signal('');
   readonly connections = signal<Connection[]>([]);
   readonly nodes = signal<NodeProjection[]>([]);
@@ -220,6 +222,8 @@ export class AppComponent implements OnInit, OnDestroy {
         this.user.set(null);
       }
       if (this.user()) {
+        const session = await this.http.get<{ canManageConnections: boolean }>('/api/session', { headers: this.headers()! }).toPromise();
+        this.canManageConnections.set(session?.canManageConnections === true);
         this.loadConnections(false);
         this.loadProjection('nodes', false);
         this.loadProjection('work');
@@ -285,7 +289,7 @@ export class AppComponent implements OnInit, OnDestroy {
 
   save(): void {
     const headers = this.headers();
-    if (!headers || this.saveBusy()) return;
+    if (!headers || this.saveBusy() || !this.canManageConnections()) return;
     this.saveBusy.set(true);
     this.setResourceError('connections', '');
     this.notice.set('');

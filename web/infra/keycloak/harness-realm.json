@@ -8,6 +8,7 @@
   "accessTokenLifespan": 300,
   "ssoSessionIdleTimeout": 900,
   "ssoSessionMaxLifespan": 28800,
+  "roles": { "realm": [{ "name": "connections.manage", "description": "Manage Harness connections and provider authorization" }] },
   "clients": [
     {
       "clientId": "harness-web",
@@ -24,6 +25,13 @@
         "post.logout.redirect.uris": "${WEB_ORIGIN}"
       },
       "protocolMappers": [
+        {
+          "name": "harness-management-roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "consentRequired": false,
+          "config": { "claim.name": "realm_access.roles", "jsonType.label": "String", "multivalued": "true", "access.token.claim": "true" }
+        },
         {
           "name": "harness-web-audience",
           "protocol": "openid-connect",
@@ -43,7 +51,18 @@
       "lastName": "Operator",
       "emailVerified": true,
       "requiredActions": [],
+      "realmRoles": ["connections.manage"],
       "credentials": [{"type": "password", "value": "${DEV_USER_PASSWORD}", "temporary": false}]
+    },
+    {
+      "username": "observer",
+      "firstName": "Local",
+      "lastName": "Observer",
+      "enabled": true,
+      "email": "observer@localhost",
+      "emailVerified": true,
+      "requiredActions": [],
+      "credentials": [{ "type": "password", "value": "${DEV_VIEWER_PASSWORD}", "temporary": false }]
     }
   ]
 }

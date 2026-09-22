@@ -16,7 +16,7 @@ foreach ($id in $ids) {
 foreach ($kind in @('volume','network')) {
     $names = @(docker $kind ls --format '{{.Name}}')
     if ($LASTEXITCODE -ne 0) { throw "Could not list Docker $kind resources." }
-    $suffixes = if ($kind -eq 'volume') { @('mongodb-data','keycloak-data','cursor-harness-data','codex-harness-data') } else { @('web','internal','harness') }
+    $suffixes = if ($kind -eq 'volume') { @('mongodb-data','keycloak-data','cursor-harness-data','codex-harness-data','cursor-provider-auth','codex-provider-auth') } else { @('web','internal','harness','provider-egress') }
     foreach ($suffix in $suffixes) {
         $name = "$ProjectName-$suffix"
         if ($names -notcontains $name) { continue }
