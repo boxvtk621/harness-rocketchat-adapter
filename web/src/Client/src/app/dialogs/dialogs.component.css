@@ -140,6 +140,10 @@ button:disabled { cursor: not-allowed; opacity: .56; }
 .message > header time { margin-left: auto; font-variant-numeric: tabular-nums; }
 .message-context { min-height: 0; padding: 0; border: 0; background: transparent; color: var(--focus, #215583); cursor: pointer; }
 .message-text { margin: 0; padding: var(--space-2, 8px) var(--space-3, 12px); white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.55; }
+.messages > app-tool-activity, .unanchored-activity { display: block; max-width: 75ch; }
+.unanchored-activity { margin: 0 0 var(--space-3, 12px); padding: var(--space-1, 4px) var(--space-2, 8px); border-left: 3px solid var(--line-strong, #85857d); background: var(--surface-alt, #f8f8f5); }
+.unanchored-activity > span { display: block; color: var(--muted, #64645e); font-size: .846rem; }
+.activity-read-error { max-width: 75ch; margin: 0 0 var(--space-2, 8px); padding: var(--space-1, 4px) var(--space-2, 8px); border-left: 3px solid var(--danger, #9b2d24); background: var(--danger-bg, #fff4f2); color: var(--danger, #9b2d24); font-size: .846rem; }
 .code-block { margin: var(--space-2, 8px) var(--space-3, 12px); border: 1px solid #d5d5cf; background: var(--dialogs-code-bg); }
 .code-block > span { display: block; padding: 2px var(--space-2, 8px); border-bottom: 1px solid #d5d5cf; color: var(--muted, #64645e); font: .846rem Consolas, "Courier New", monospace; }
 .code-block pre, .tool-details pre, .tool-output pre { max-width: 100%; margin: 0; padding: var(--space-2, 8px); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: .923rem/1.5 Consolas, "Courier New", monospace; }

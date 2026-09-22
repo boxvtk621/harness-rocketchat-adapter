@@ -1,0 +1,45 @@
+<details
+  class="agent-activity"
+  [open]="open"
+  [attr.data-state]="group.state"
+  [attr.data-attempt-id]="group.attemptId"
+  (toggle)="toggle($event)">
+  <summary>
+    <span class="summary-mark" aria-hidden="true"></span>
+    <strong>Действия агента</strong>
+    <span class="summary-meta">{{ group.pagination.hasMore ? group.calls.length + ' загружено' : countLabel(group.calls.length) }}</span>
+    <span class="group-state">{{ groupStateLabel(group.state) }}</span>
+  </summary>
+
+  <div class="activity-list">
+    @for (tool of group.calls; track tool.toolCallId) {
+      <button
+        type="button"
+        class="activity-row"
+        [attr.data-testid]="'inline-tool-call-' + tool.toolCallId"
+        [attr.data-state]="tool.state"
+        [attr.aria-current]="selectedToolCallId === tool.toolCallId ? 'true' : null"
+        [attr.aria-label]="tool.toolName + ': ' + stateLabel(tool.state)"
+        (click)="select(tool)">
+        <span class="tool-state" aria-hidden="true"></span>
+        <span class="tool-copy">
+          <strong>{{ tool.toolName }}</strong>
+          <span>{{ stateLabel(tool.state) }}</span>
+        </span>
+        @if (duration(tool); as elapsed) {
+          <span class="duration">{{ elapsed }}</span>
+        }
+      </button>
+    }
+  </div>
+
+  @if (group.pagination.hasMore) {
+    <button
+      type="button"
+      class="load-more"
+      [disabled]="group.pagination.loading"
+      (click)="loadMore.emit(group)">
+      {{ group.pagination.loading ? 'Загрузка…' : 'Показать ещё действия' }}
+    </button>
+  }
+</details>

@@ -11,6 +11,7 @@ import {
   Output,
   SimpleChanges,
   ViewChild,
+  computed,
   signal
 } from '@angular/core';
 import { FormsModule } from '@angular/forms';
@@ -27,7 +28,6 @@ import {
   HarnessPage,
   HarnessRequest,
   HarnessSnapshot,
-  MarkdownBlock,
   PendingCommand,
   PENDING_COMMAND_STORAGE_PREFIX,
   SafeContent,
@@ -36,6 +36,10 @@ import {
   ToolCallRead,
   ToolCallSummary
 } from './dialogs.models';
+import { MarkdownRendererComponent } from '../markdown/markdown-renderer.component';
+import { ToolActivityComponent } from './tool-activity.component';
+import { ToolActivityGroup, ToolActivityPage, ToolActivitySelection } from './tool-activity.models';
+import { buildToolActivityGroups, dedupeToolCalls } from './tool-activity';
 
 interface NodeReadContext {
   connectionId: string;
@@ -66,7 +70,7 @@ const MESSAGE_LIMIT = 16_000;
 @Component({
   selector: 'app-dialogs',
   standalone: true,
-  imports: [CommonModule, FormsModule],
+  imports: [CommonModule, FormsModule, MarkdownRendererComponent, ToolActivityComponent],
   templateUrl: './dialogs.component.html',
   styleUrl: './dialogs.component.css'
 })
@@ -114,6 +118,12 @@ export class DialogsComponent implements OnChanges, OnDestroy, AfterViewInit {
   readonly reconcilingCommandId = signal<string | null>(null);
   readonly snapshots = signal<Record<string, HarnessSnapshot>>({});
   readonly identities = signal<Record<string, HarnessIdentity>>({});
+  readonly activityPages = signal<ToolActivityPage[]>([]);
+  readonly activityErrors = signal<Record<string, string>>({});
+  readonly activityGroups = computed(() => buildToolActivityGroups({
+    pages: this.activityPages(),
+    messages: this.messages()
+  }));
 
   dialogQuery = '';
   nodeFilter = 'all';
@@ -131,6 +141,13 @@ export class DialogsComponent implements OnChanges, OnDestroy, AfterViewInit {
   private userAtHistoryEnd = true;
   private historyCursorInitialized = false;
   private lastSessionKey = '';
+  private activityGeneration = 0;
+  private readonly activityQueued = new Set<string>();
+  private readonly activityInFlight = new Set<string>();
+  private readonly activityLoaded = new Set<string>();
+  private readonly activityRequestsLoaded = new Set<string>();
+  private readonly activityQueue: string[] = [];
+  private static readonly ACTIVITY_CONCURRENCY = 4;
 
   constructor(private readonly http: HttpClient) {}
 
@@ -299,6 +316,7 @@ export class DialogsComponent implements OnChanges, OnDestroy, AfterViewInit {
     this.requestNextCursor.set(null);
     this.attemptNextCursor.set(null);
     this.toolNextCursor.set(null);
+    this.resetActivityCache();
     this.historyCursorInitialized = false;
     this.historyError.set('');
     this.contextError.set('');
@@ -336,6 +354,7 @@ export class DialogsComponent implements OnChanges, OnDestroy, AfterViewInit {
       const freshMinSequence = historyPage.items.reduce((minimum, message) => Math.min(minimum, message.sequence), Number.MAX_SAFE_INTEGER);
       this.messages.set(nextMessages);
       this.requests.set(requestPage.items);
+      this.queueVisibleActivities(nextMessages, dialog, merge);
       const freshPageStartsAfterGap = merge
         && currentMaxSequence > 0
         && freshMinSequence !== Number.MAX_SAFE_INTEGER
@@ -381,7 +400,9 @@ export class DialogsComponent implements OnChanges, OnDestroy, AfterViewInit {
         { limit: HISTORY_LIMIT, order: 'latest', cursor }
       );
       if (this.selectedDialogId() !== this.dialogKey(dialog)) return;
-      this.messages.set(this.mergeMessages(page.items, this.messages()));
+      const merged = this.mergeMessages(page.items, this.messages());
+      this.messages.set(merged);
+      this.queueVisibleActivities(merged, dialog, false);
       this.historyNextCursor.set(page.nextCursor);
       window.setTimeout(() => {
         if (viewport) viewport.scrollTop = oldTop + viewport.scrollHeight - oldHeight;
@@ -417,7 +438,7 @@ export class DialogsComponent implements OnChanges, OnDestroy, AfterViewInit {
     }
   }
 
-  async selectRequest(request: HarnessRequest, preserveAttempt = false): Promise<void> {
+  async selectRequest(request: HarnessRequest, preserveAttempt = false, preferredAttemptId?: string): Promise<void> {
     const dialog = this.selectedDialog();
     if (!dialog) return;
     const generation = ++this.requestGeneration;
@@ -439,9 +460,9 @@ export class DialogsComponent implements OnChanges, OnDestroy, AfterViewInit {
       this.attempts.set(page.items);
       this.attemptNextCursor.set(page.nextCursor);
       this.contextLoading.set(false);
-      const current = page.items.find(item => item.attemptId === this.selectedAttemptId());
+      const current = page.items.find(item => item.attemptId === (preferredAttemptId ?? this.selectedAttemptId()));
       const preferred = current ?? [...page.items].sort((a, b) => b.generation - a.generation)[0];
-      if (preferred) void this.selectAttempt(preferred, preserveAttempt);
+      if (preferred) await this.selectAttempt(preferred, preserveAttempt);
     } catch (error) {
       if (generation !== this.requestGeneration) return;
       this.contextLoading.set(false);
@@ -535,17 +556,17 @@ export class DialogsComponent implements OnChanges, OnDestroy, AfterViewInit {
     }
   }
 
-  async selectToolCall(tool: ToolCallSummary): Promise<void> {
+  async selectToolCall(tool: ToolCallSummary, explicitAttemptId?: string): Promise<void> {
     const dialog = this.selectedDialog();
-    const attempt = this.selectedAttempt();
-    if (!dialog || !attempt) return;
+    const attemptId = explicitAttemptId ?? this.selectedAttempt()?.attemptId;
+    if (!dialog || !attemptId) return;
     const generation = ++this.toolGeneration;
     this.selectedToolCallId.set(tool.toolCallId);
     this.toolLoading.set(true);
     this.contextError.set('');
     try {
       const read = await this.get<ToolCallRead>(
-        this.dialogRoute(dialog, `attempts/${encodeURIComponent(attempt.attemptId)}/tool-calls/${encodeURIComponent(tool.toolCallId)}`),
+        this.dialogRoute(dialog, `attempts/${encodeURIComponent(attemptId)}/tool-calls/${encodeURIComponent(tool.toolCallId)}`),
         dialog.configEpoch,
         { limit: TOOL_LIMIT }
       );
@@ -561,14 +582,13 @@ export class DialogsComponent implements OnChanges, OnDestroy, AfterViewInit {
 
   async loadMoreToolOutputs(): Promise<void> {
     const dialog = this.selectedDialog();
-    const attempt = this.selectedAttempt();
     const detail = this.toolDetail();
-    if (!dialog || !attempt || !detail?.nextOutputCursor || this.toolLoading()) return;
+    if (!dialog || !detail?.nextOutputCursor || this.toolLoading()) return;
     const generation = ++this.toolGeneration;
     this.toolLoading.set(true);
     try {
       const read = await this.get<ToolCallRead>(
-        this.dialogRoute(dialog, `attempts/${encodeURIComponent(attempt.attemptId)}/tool-calls/${encodeURIComponent(detail.toolCallId)}`),
+        this.dialogRoute(dialog, `attempts/${encodeURIComponent(detail.attemptId)}/tool-calls/${encodeURIComponent(detail.toolCallId)}`),
         dialog.configEpoch,
         { after: detail.nextOutputCursor, limit: TOOL_LIMIT }
       );
@@ -839,23 +859,78 @@ export class DialogsComponent implements OnChanges, OnDestroy, AfterViewInit {
     return message.content.kind === 'inline' ? message.content.content : '';
   }
 
-  messageBlocks(message: HarnessMessage): MarkdownBlock[] {
-    return this.markdownBlocks(this.messageText(message));
+  activityBefore(message: HarnessMessage): ToolActivityGroup[] {
+    return this.activityGroups().filter(group => group.anchor.placement === 'before' && group.anchor.messageId === message.messageId);
   }
 
-  markdownBlocks(value: string): MarkdownBlock[] {
-    if (!value) return [];
-    const blocks: MarkdownBlock[] = [];
-    const pattern = /```([^\r\n`]*)\r?\n([\s\S]*?)(?:\r?\n```|$)/g;
-    let offset = 0;
-    for (const match of value.matchAll(pattern)) {
-      const index = match.index ?? 0;
-      if (index > offset) blocks.push({ kind: 'text', text: value.slice(offset, index) });
-      blocks.push({ kind: 'code', language: match[1].trim(), text: match[2] });
-      offset = index + match[0].length;
+  activityAfter(message: HarnessMessage): ToolActivityGroup[] {
+    return this.activityGroups().filter(group => group.anchor.placement === 'after' && group.anchor.messageId === message.messageId);
+  }
+
+  tailActivities(): ToolActivityGroup[] {
+    return this.activityGroups().filter(group => group.anchor.placement === 'tail');
+  }
+
+  activityErrorBefore(message: HarnessMessage): string {
+    return message.role === 'assistant' ? (this.activityErrors()[message.attemptId] ?? '') : '';
+  }
+
+  activityErrorAfter(message: HarnessMessage): string {
+    if (message.role !== 'user') return '';
+    const dialog = this.selectedDialog();
+    if (!dialog?.activeAttemptId || dialog.activeRequestId !== message.requestId) return '';
+    const hasResponse = this.messages().some(item => item.role === 'assistant' && item.attemptId === dialog.activeAttemptId);
+    return hasResponse ? '' : (this.activityErrors()[dialog.activeAttemptId] ?? '');
+  }
+
+  async inspectInlineTool(selection: ToolActivitySelection): Promise<void> {
+    const request = this.requests().find(item => item.requestId === selection.requestId);
+    if (request && this.selectedRequestId() !== selection.requestId) await this.selectRequest(request, false, selection.attemptId);
+    const attempt = this.attempts().find(item => item.attemptId === selection.attemptId)
+      ?? this.activityPages().find(item => item.attempt.attemptId === selection.attemptId)?.attempt;
+    if (!attempt) return;
+    this.selectedRequestId.set(selection.requestId);
+    this.selectedAttemptId.set(selection.attemptId);
+    const summaries = this.activityPages()
+      .filter(page => page.attempt.attemptId === selection.attemptId)
+      .flatMap(page => page.items);
+    this.toolCalls.set(dedupeToolCalls(summaries));
+    await this.selectToolCall(selection.toolCall, selection.attemptId);
+  }
+
+  async loadMoreInlineActivity(group: ToolActivityGroup): Promise<void> {
+    const dialog = this.selectedDialog();
+    if (!dialog || !group.pagination.nextCursor || group.pagination.loading) return;
+    const generation = this.activityGeneration;
+    this.activityPages.update(pages => pages.map(page =>
+      page.attempt.attemptId === group.attemptId && page.nextCursor === group.pagination.nextCursor
+        ? { ...page, loading: true }
+        : page));
+    try {
+      const page = await this.get<ToolCallPage>(
+        this.dialogRoute(dialog, `attempts/${encodeURIComponent(group.attemptId)}/tool-calls`),
+        dialog.configEpoch,
+        { limit: TOOL_LIMIT, cursor: group.pagination.nextCursor }
+      );
+      if (generation !== this.activityGeneration || this.selectedDialogId() !== this.dialogKey(dialog)) return;
+      const attempt = this.activityPages().find(item => item.attempt.attemptId === group.attemptId)?.attempt;
+      if (!attempt) return;
+      this.activityPages.update(pages => [
+        ...pages.map(item => item.attempt.attemptId === group.attemptId ? { ...item, loading: false } : item),
+        {
+          requestId: page.requestId,
+          inputMessageId: this.inputMessageId(page.requestId),
+          attempt,
+          items: page.items,
+          nextCursor: page.nextCursor,
+          loading: false
+        }
+      ]);
+    } catch (error) {
+      if (generation !== this.activityGeneration) return;
+      this.activityPages.update(pages => pages.map(item => item.attempt.attemptId === group.attemptId ? { ...item, loading: false } : item));
+      this.activityErrors.update(errors => ({ ...errors, [group.attemptId]: this.failure(error).message }));
     }
-    if (offset < value.length) blocks.push({ kind: 'text', text: value.slice(offset) });
-    return blocks.length ? blocks : [{ kind: 'text', text: value }];
   }
 
   safeContentText(content?: SafeContent): string {
@@ -1158,6 +1233,141 @@ export class DialogsComponent implements OnChanges, OnDestroy, AfterViewInit {
 
   private sortMessages(items: HarnessMessage[]): HarnessMessage[] {
     return [...items].sort((a, b) => a.sequence - b.sequence || a.messageId.localeCompare(b.messageId));
+  }
+
+  private resetActivityCache(): void {
+    this.activityGeneration++;
+    this.activityPages.set([]);
+    this.activityErrors.set({});
+    this.activityQueued.clear();
+    // Keys include the generation, so late finalizers cannot remove entries from
+    // the new dialog. Release the UI concurrency quota immediately; stale HTTP
+    // responses are still rejected by generation and dialog identity checks.
+    this.activityInFlight.clear();
+    this.activityLoaded.clear();
+    this.activityRequestsLoaded.clear();
+    this.activityQueue.length = 0;
+  }
+
+  private queueVisibleActivities(messages: HarnessMessage[], dialog: DialogListRow, refresh: boolean): void {
+    const attemptIds = new Set(messages
+      .filter((message): message is Extract<HarnessMessage, { role: 'assistant' }> => message.role === 'assistant')
+      .map(message => message.attemptId));
+    if (dialog.activeAttemptId) attemptIds.add(dialog.activeAttemptId);
+    const runningIds = new Set(this.activityPages()
+      .filter(page => ['dispatching', 'running', 'waiting_input', 'stopping'].includes(page.attempt.state))
+      .map(page => page.attempt.attemptId));
+    const activeRequestIds = new Set(this.requests()
+      .filter(request => ['dispatching', 'active'].includes(request.status))
+      .map(request => request.requestId));
+    for (const requestId of new Set(messages
+      .filter((message): message is Extract<HarnessMessage, { role: 'user' }> => message.role === 'user')
+      .map(message => message.requestId))) {
+      this.enqueueActivityRequest(requestId, refresh && activeRequestIds.has(requestId));
+    }
+    for (const attemptId of attemptIds) {
+      if (this.activityLoaded.has(attemptId) && (!refresh || !runningIds.has(attemptId))) continue;
+      this.enqueueActivity(attemptId);
+    }
+    this.pumpActivityQueue();
+  }
+
+  private enqueueActivity(attemptId: string): void {
+    const key = `${this.activityGeneration}\u0000attempt\u0000${attemptId}`;
+    if (!attemptId || this.activityQueued.has(key) || this.activityInFlight.has(key)) return;
+    this.activityQueued.add(key);
+    this.activityQueue.push(key);
+  }
+
+  private enqueueActivityRequest(requestId: string, refresh: boolean): void {
+    if (!requestId || (this.activityRequestsLoaded.has(requestId) && !refresh)) return;
+    const key = `${this.activityGeneration}\u0000request\u0000${requestId}`;
+    if (this.activityQueued.has(key) || this.activityInFlight.has(key)) return;
+    this.activityQueued.add(key);
+    this.activityQueue.push(key);
+  }
+
+  private pumpActivityQueue(): void {
+    while (this.activityInFlight.size < DialogsComponent.ACTIVITY_CONCURRENCY && this.activityQueue.length) {
+      const key = this.activityQueue.shift();
+      if (!key) continue;
+      const [, kind, id] = key.split('\u0000');
+      this.activityQueued.delete(key);
+      this.activityInFlight.add(key);
+      const read = kind === 'request' ? this.readRequestActivities(id) : this.readActivity(id);
+      void read.finally(() => {
+        this.activityInFlight.delete(key);
+        this.pumpActivityQueue();
+      });
+    }
+  }
+
+  private async readRequestActivities(requestId: string): Promise<void> {
+    const dialog = this.selectedDialog();
+    if (!dialog) return;
+    const generation = this.activityGeneration;
+    try {
+      let cursor: string | null = null;
+      let pageCount = 0;
+      do {
+        const page: HarnessPage<HarnessAttempt> = await this.get<HarnessPage<HarnessAttempt>>(
+          this.dialogRoute(dialog, 'attempts'), dialog.configEpoch,
+          { requestId, limit: ATTEMPT_LIMIT, cursor }
+        );
+        if (generation !== this.activityGeneration || this.selectedDialogId() !== this.dialogKey(dialog)) return;
+        page.items.forEach((attempt: HarnessAttempt) => {
+          const running = ['dispatching', 'running', 'waiting_input', 'stopping'].includes(attempt.state);
+          if (!this.activityLoaded.has(attempt.attemptId) || running) this.enqueueActivity(attempt.attemptId);
+        });
+        cursor = page.nextCursor;
+        pageCount++;
+      } while (cursor && pageCount < 5);
+      this.activityRequestsLoaded.add(requestId);
+      if (cursor) this.contextError.set('Для одного обращения показаны первые 100 попыток. Остальные доступны через постраничный контекст выполнения.');
+    } catch (error) {
+      if (generation !== this.activityGeneration || this.selectedDialogId() !== this.dialogKey(dialog)) return;
+      this.contextError.set(this.failure(error).message);
+    }
+  }
+
+  private async readActivity(attemptId: string): Promise<void> {
+    const dialog = this.selectedDialog();
+    if (!dialog) return;
+    const generation = this.activityGeneration;
+    try {
+      const [attemptRead, page] = await Promise.all([
+        this.get<{ attempt: HarnessAttempt }>(
+          this.dialogRoute(dialog, `attempts/${encodeURIComponent(attemptId)}`), dialog.configEpoch),
+        this.get<ToolCallPage>(
+          this.dialogRoute(dialog, `attempts/${encodeURIComponent(attemptId)}/tool-calls`),
+          dialog.configEpoch, { limit: TOOL_LIMIT })
+      ]);
+      if (generation !== this.activityGeneration || this.selectedDialogId() !== this.dialogKey(dialog)) return;
+      const requestId = page.requestId || attemptRead.attempt.requestId;
+      const next: ToolActivityPage = {
+        requestId,
+        inputMessageId: this.inputMessageId(requestId),
+        attempt: attemptRead.attempt,
+        items: page.items,
+        nextCursor: page.nextCursor,
+        loading: false
+      };
+      this.activityPages.update(pages => [...pages.filter(item => item.attempt.attemptId !== attemptId), next]);
+      this.activityErrors.update(errors => {
+        const { [attemptId]: _removed, ...rest } = errors;
+        return rest;
+      });
+      this.activityLoaded.add(attemptId);
+    } catch (error) {
+      if (generation !== this.activityGeneration || this.selectedDialogId() !== this.dialogKey(dialog)) return;
+      this.activityErrors.update(errors => ({ ...errors, [attemptId]: this.failure(error).message }));
+    }
+  }
+
+  private inputMessageId(requestId: string): string {
+    return this.requests().find(item => item.requestId === requestId)?.inputMessageId
+      ?? this.messages().find(message => message.role === 'user' && message.requestId === requestId)?.messageId
+      ?? '';
   }
 
   private canWriteToNode(node: DialogNodeProjection): boolean {

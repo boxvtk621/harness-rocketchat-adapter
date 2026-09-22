@@ -181,6 +181,16 @@
             </div>
           }
           @for (message of messages(); track message.messageId) {
+            @if (activityErrorBefore(message); as activityError) {
+              <p class="activity-read-error" role="status">Действия агента недоступны: {{ activityError }}</p>
+            }
+            @for (group of activityBefore(message); track group.key) {
+              <app-tool-activity
+                [group]="group"
+                [selectedToolCallId]="selectedToolCallId()"
+                (inspect)="inspectInlineTool($event)"
+                (loadMore)="loadMoreInlineActivity($event)" />
+            }
             <article
               class="message"
               [class.user-message]="message.role === 'user'"
@@ -195,15 +205,13 @@
                 }
                 <time [attr.datetime]="message.createdAt">{{ formatTime(message.createdAt) }}</time>
               </header>
-              @for (block of messageBlocks(message); track $index) {
-                @if (block.kind === 'code') {
-                  <div class="code-block">
-                    @if (block.language) { <span>{{ block.language }}</span> }
-                    <pre><code>{{ block.text }}</code></pre>
-                  </div>
-                } @else {
-                  <p class="message-text">{{ block.text }}</p>
-                }
+              @if (message.role === 'user') {
+                <p class="message-text">{{ message.text }}</p>
+              } @else if (message.content.kind === 'inline') {
+                <app-markdown-renderer
+                  [identity]="message.messageId"
+                  [version]="message.version"
+                  [content]="message.content.content" />
               }
               @if (message.role === 'assistant' && message.content.kind !== 'inline') {
                 <div class="content-reference">
@@ -215,6 +223,26 @@
                 <p class="content-note">{{ safeContentNote(message.content) }}</p>
               }
             </article>
+            @if (activityErrorAfter(message); as activityError) {
+              <p class="activity-read-error" role="status">Действия агента недоступны: {{ activityError }}</p>
+            }
+            @for (group of activityAfter(message); track group.key) {
+              <app-tool-activity
+                [group]="group"
+                [selectedToolCallId]="selectedToolCallId()"
+                (inspect)="inspectInlineTool($event)"
+                (loadMore)="loadMoreInlineActivity($event)" />
+            }
+          }
+          @for (group of tailActivities(); track group.key) {
+            <div class="unanchored-activity">
+              <span>Связанный запрос не входит в загруженную страницу истории.</span>
+              <app-tool-activity
+                [group]="group"
+                [selectedToolCallId]="selectedToolCallId()"
+                (inspect)="inspectInlineTool($event)"
+                (loadMore)="loadMoreInlineActivity($event)" />
+            </div>
           }
         </div>
 
@@ -235,7 +263,7 @@
             (keydown)="onDraftKeydown($event)"
             placeholder="Введите сообщение. Ctrl/Cmd+Enter — отправить"></textarea>
           <div class="composer-foot">
-            <span class="format-hint">Блоки кода: ```; остальное — обычный текст.</span>
+            <span class="format-hint">Ответ Harness поддерживает Markdown; ваш текст отправляется без преобразования.</span>
             <span [class.error-text]="draft.length > 16000">{{ draft.length.toLocaleString('ru-RU') }} / 16 000</span>
             <button
               type="button"

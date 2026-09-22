@@ -245,10 +245,4 @@ export interface DialogListRow extends HarnessDialog {
   lastActivityAt: string;
 }
 
-export interface MarkdownBlock {
-  kind: 'text' | 'code';
-  text: string;
-  language?: string;
-}
-
 export const PENDING_COMMAND_STORAGE_PREFIX = 'hl307:pending:';

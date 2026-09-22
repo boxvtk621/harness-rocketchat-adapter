@@ -12,22 +12,40 @@ await mkdir(out, { recursive: true });
 const password = (await readFile(process.env.DEV_USER_PASSWORD_FILE, 'utf8')).trim();
 const id = n => `aaaaaaaa-aaaa-4aaa-8aaa-${String(n).padStart(12, '0')}`;
 const nodeId = id(1), dialogId = id(2), requestId = id(3), attemptId = id(4), toolId = id(5);
+const requestId2 = id(13), attemptId2 = id(14), toolId2 = id(15);
+const retryAttemptId = id(16), retryToolId = id(17);
+const requestId3 = id(23), attemptId3 = id(24), toolId3 = id(25);
 const now = '2026-09-21T16:00:00Z';
 const safe = (content, truncated = false) => ({ kind: 'inline', content, redaction: 'none', truncated });
 const node = { connectionId: 'fixture', name: 'Тестовый Harness · UI fixture', configEpoch: 1, identityStatus: 'unique', observation: {
   nodeId, ready: true, attemptedAt: now, successfulAt: now, httpReachable: true, executorHealthy: true, heartbeatFresh: true, heartbeatAt: now, bootId: id(9), compatibility: 'compatible', availability: 'available', occupancy: 'idle'
 } };
-let dialog = { dialogId, version: 41, title: 'Проверка workspace и инструментов · fixture', createdAt: now, lastActivityAt: now, state: 'completed' };
+let dialog = { dialogId, version: 41, title: 'Проверка workspace и инструментов · fixture', createdAt: now, lastActivityAt: now, state: 'active', activeRequestId: requestId3, activeAttemptId: attemptId3 };
 const request = { requestId, dialogId, inputMessageId: id(100), queueSequence: 1, version: 2, status: 'completed' };
 const attempt = { attemptId, dialogId, requestId, generation: 1, version: 2, state: 'completed', effectStatus: 'known', startedAt: now, finishedAt: now };
-const messages = Array.from({ length: 80 }, (_, index) => index % 2 === 0 ? {
+const request2 = { requestId: requestId2, dialogId, inputMessageId: id(178), queueSequence: 2, version: 2, status: 'completed' };
+const request3 = { requestId: requestId3, dialogId, inputMessageId: id(180), queueSequence: 3, version: 2, status: 'active' };
+const attempt2 = { attemptId: attemptId2, dialogId, requestId: requestId2, generation: 2, version: 2, state: 'completed', effectStatus: 'known', startedAt: now, finishedAt: now };
+const retryAttempt = { attemptId: retryAttemptId, dialogId, requestId: requestId2, generation: 1, version: 2, state: 'failed', effectStatus: 'known', startedAt: now, finishedAt: now };
+const attempt3 = { attemptId: attemptId3, dialogId, requestId: requestId3, generation: 3, version: 2, state: 'running', effectStatus: 'known', startedAt: now };
+const gfmFixture = '# Проверка GFM\n\n**жирный** и *курсив*, ~~удалено~~, `inline`.\n\n1. Пункт\n   - вложенный\n\n> Цитата\n\n- [x] готово\n- [ ] позже\n\n| Колонка | Очень длинное значение |\n| --- | --- |\n| A | ' + 'длинный текст '.repeat(20) + '|\n\n---\n\n```ts\nconst exact = "  spaces  ";\n```\n\n[безопасная ссылка](https://example.org/docs) [опасная](javascript:alert(1)) ![tracker](https://example.test/pixel.png)\n\n<script>window.hacked=true</script>\n<img src=x onerror="window.hacked=true">';
+const messages = Array.from({ length: 78 }, (_, index) => index % 2 === 0 ? {
   messageId: id(100 + index), role: 'user', dialogId, sequence: index + 1, version: 1, createdAt: now, text: `Сообщение ${index + 1}: прочитай тестовый файл и объясни результат.`, disposition: 'applied', commandId: id(300 + index), requestId
 } : {
   messageId: id(100 + index), role: 'assistant', dialogId, sequence: index + 1, version: 1, createdAt: now, attemptId,
-  content: safe(index === 79 ? 'Прочитан безопасный тестовый файл.\n```text\nHL-307 fixture content\n```\n<script>window.hacked=true</script>' : `Ответ ${index + 1}. Результат сохранён и доступен после перезагрузки.\nПроверка относится к контролируемой UI fixture.`), finishReason: 'complete'
+  content: safe(`Ответ ${index + 1}. Результат сохранён и доступен после перезагрузки.\nПроверка относится к контролируемой UI fixture.`), finishReason: 'complete'
 });
+messages.push(
+  { messageId: id(178), role: 'user', dialogId, sequence: 79, version: 1, createdAt: now, text: 'Покажи Markdown и отдельные действия.', disposition: 'applied', commandId: id(378), requestId: requestId2 },
+  { messageId: id(179), role: 'assistant', dialogId, sequence: 80, version: 3, createdAt: now, attemptId: attemptId2,
+    content: safe(gfmFixture), finishReason: 'complete' },
+  { messageId: id(180), role: 'user', dialogId, sequence: 81, version: 1, createdAt: now, text: 'Текущее обращение ещё выполняется.', disposition: 'applied', commandId: id(380), requestId: requestId3 }
+);
 const summary = { toolCallId: toolId, toolName: 'read_test_file', state: 'succeeded', startedAt: now, finishedAt: now, detailVersion: 3 };
 const failedTool = { toolCallId: id(6), toolName: 'fixture_failure', state: 'failed', startedAt: now, finishedAt: now, detailVersion: 4 };
+const summary2 = { toolCallId: toolId2, toolName: 'render_markdown_fixture', state: 'succeeded', startedAt: now, finishedAt: now, detailVersion: 1 };
+const retrySummary = { toolCallId: retryToolId, toolName: 'failed_retry_fixture', state: 'failed', startedAt: now, finishedAt: now, detailVersion: 1 };
+const summary3 = { toolCallId: toolId3, toolName: 'running_fixture', state: 'running', startedAt: now, detailVersion: 1 };
 const envelope = { protocolVersion: 1, schemaId: 'harness-wire-v2', nodeId, epoch: 1, snapshotStateVersion: 90, stateVersion: 90, lastEventSeq: 90 };
 const pageDto = (items, pageType, extra = {}) => ({ ...envelope, items, nextCursor: null, pageType, ...extra });
 const canonical = x => x === null || typeof x !== 'object' ? JSON.stringify(x) : Array.isArray(x) ? `[${x.map(canonical).join(',')}]` : `{${Object.keys(x).sort().map(k => `${JSON.stringify(k)}:${canonical(x[k])}`).join(',')}}`;
@@ -35,6 +53,7 @@ const commandStatuses = new Map();
 let posts = 0, historyError = false, receiptReadable = false, detailFetches = 0, historyFetches = 0;
 const browser = await chromium.launch({ headless: true, args: ['--host-resolver-rules=MAP localhost host.docker.internal'] });
 const context = await browser.newContext({ viewport: { width: 2560, height: 1440 } });
+await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: base });
 await context.addInitScript(() => {
   const NativeWebSocket = window.WebSocket;
   const sockets = [];
@@ -46,7 +65,9 @@ await context.addInitScript(() => {
 });
 const page = await context.newPage();
 const runtimeErrors = [];
+const externalImageRequests = [];
 page.on('pageerror', error => runtimeErrors.push(error.message));
+page.on('request', request => { if (request.url().startsWith('https://example.test/')) externalImageRequests.push(request.url()); });
 await page.route('**/api/projections/nodes', route => route.fulfill({ json: [node] }));
 await page.route('**/api/dialogs/**', async route => {
   const url = new URL(route.request().url());
@@ -54,7 +75,7 @@ await page.route('**/api/dialogs/**', async route => {
   const json = data => route.fulfill({ json: data });
   const error = (status, code) => route.fulfill({ status, json: { code } });
   if (path === 'identity') return json({ ...envelope, schemaSHA256: '0'.repeat(64), registryVersion: 1, identityEpoch: 1, adapter: { kind: 'fixture', version: '1' }, capabilities: { chat: 'verified', tool_results: 'verified' } });
-  if (path === 'snapshot') return json({ ...envelope, capturedAt: now, completeness: 'complete', node: { transportAvailability: 'online', engineReadiness: node.observation.ready ? 'ready' : 'blocked', occupancy: 'idle', queuePaused: false, queueVersion: 1, pendingCount: 0, blockedReasons: node.observation.ready ? [] : ['auth_unavailable'], activeAttemptId: null }, pendingQueue: [], activeAttempt: null });
+  if (path === 'snapshot') return json({ ...envelope, capturedAt: now, completeness: 'complete', node: { transportAvailability: 'online', engineReadiness: node.observation.ready ? 'ready' : 'blocked', occupancy: 'active', queuePaused: false, queueVersion: 1, pendingCount: 0, blockedReasons: node.observation.ready ? [] : ['auth_unavailable'], activeAttemptId: attemptId3 }, pendingQueue: [], activeAttempt: attempt3 });
   if (path === 'dialogs') return json(pageDto([dialog], 'dialogs', { schemaId: 'dialog-view-v1' }));
   if (path === `dialogs/${dialogId}`) return json({ ...envelope, schemaId: 'dialog-view-v1', dialog });
   if (path === `dialogs/${dialogId}/history`) {
@@ -64,10 +85,20 @@ await page.route('**/api/dialogs/**', async route => {
     const start = Math.max(0, end - Number(url.searchParams.get('limit') ?? 30));
     return json(pageDto(messages.slice(start, end), 'history', { dialogId, nextCursor: start ? String(start) : null }));
   }
-  if (path === 'requests') return json(pageDto([request], 'requests'));
-  if (path === 'attempts') return json(pageDto([attempt], 'attempts', { dialogId, requestId }));
+  if (path === 'requests') return json(pageDto([request2, request3], 'requests'));
+  if (path === 'attempts') {
+    const requested = url.searchParams.get('requestId');
+    const selectedAttempts = requested === requestId2 ? [retryAttempt, attempt2] : requested === requestId3 ? [attempt3] : [attempt];
+    return json(pageDto(selectedAttempts, 'attempts', { dialogId, requestId: requested }));
+  }
   if (path === `attempts/${attemptId}`) return json({ ...envelope, attempt });
+  if (path === `attempts/${attemptId2}`) return json({ ...envelope, attempt: attempt2 });
+  if (path === `attempts/${retryAttemptId}`) return json({ ...envelope, attempt: retryAttempt });
+  if (path === `attempts/${attemptId3}`) return json({ ...envelope, attempt: attempt3 });
   if (path === `attempts/${attemptId}/tool-calls`) return json(pageDto([summary, failedTool], 'tool_calls', { schemaId: 'tool-timeline-v1', dialogId, requestId, attemptId }));
+  if (path === `attempts/${attemptId2}/tool-calls`) return json(pageDto([summary2], 'tool_calls', { schemaId: 'tool-timeline-v1', dialogId, requestId: requestId2, attemptId: attemptId2 }));
+  if (path === `attempts/${retryAttemptId}/tool-calls`) return json(pageDto([retrySummary], 'tool_calls', { schemaId: 'tool-timeline-v1', dialogId, requestId: requestId2, attemptId: retryAttemptId }));
+  if (path === `attempts/${attemptId3}/tool-calls`) return json(pageDto([summary3], 'tool_calls', { schemaId: 'tool-timeline-v1', dialogId, requestId: requestId3, attemptId: attemptId3 }));
   if (path?.startsWith(`attempts/${attemptId}/tool-calls/`)) {
     detailFetches++;
     const selected = path.endsWith(toolId) ? summary : failedTool;
@@ -107,9 +138,49 @@ try {
   await page.locator('#username').fill('operator'); await page.locator('#password').fill(password); await page.locator('#kc-login').click();
   await page.getByTestId('screen-work').waitFor({ timeout: 45000 });
   await page.getByTestId('nav-dialogs').click();
-  await page.getByTestId(`tool-call-${toolId}`).waitFor();
+  await page.getByTestId(`inline-tool-call-${toolId}`).waitFor({ state: 'attached' });
+  await page.getByTestId(`inline-tool-call-${toolId2}`).waitFor({ state: 'attached' });
+  await page.getByTestId(`inline-tool-call-${retryToolId}`).waitFor({ state: 'attached' });
+  await page.getByTestId(`inline-tool-call-${toolId3}`).waitFor();
+  assert.equal(await page.locator('app-tool-activity').count(), 4, 'Each request/attempt, including a failed retry without an answer, keeps a distinct inline activity group');
+  const firstGroup = page.getByTestId(`inline-tool-call-${toolId}`).locator('xpath=ancestor::details');
+  await firstGroup.locator('summary').click();
+  const runningGroup = page.getByTestId(`inline-tool-call-${toolId3}`).locator('xpath=ancestor::details');
+  assert.ok(await runningGroup.getAttribute('open') !== null, 'Running activity opens by default');
+  const secondGroup = page.getByTestId(`inline-tool-call-${toolId2}`).locator('xpath=ancestor::details');
+  assert.equal(await secondGroup.locator('xpath=ancestor::app-tool-activity/following-sibling::article[1]').getAttribute('data-testid'), `message-${id(179)}`, 'Completed activity anchors before its exact response');
+  const retryGroup = page.getByTestId(`inline-tool-call-${retryToolId}`).locator('xpath=ancestor::details');
+  assert.equal(await retryGroup.locator('xpath=ancestor::app-tool-activity/preceding-sibling::article[1]').getAttribute('data-testid'), `message-${id(178)}`, 'Failed retry without a response anchors after its exact request');
+  assert.equal(await runningGroup.locator('xpath=ancestor::app-tool-activity/preceding-sibling::article[1]').getAttribute('data-testid'), `message-${id(180)}`, 'Current activity anchors after its request while no response exists');
+  const markdownMessage = page.getByTestId(`message-${id(179)}`);
+  assert.equal(await markdownMessage.locator('h1').innerText(), 'Проверка GFM');
+  assert.equal(await markdownMessage.locator('table').count(), 1);
+  assert.equal(await markdownMessage.locator('.markdown-task-checkbox').count(), 2);
+  assert.equal(await markdownMessage.locator('s').innerText(), 'удалено');
+  assert.equal(await markdownMessage.locator('script, img, a[href^="javascript:"], a[href^="data:"]').count(), 0, 'Untrusted HTML, images and unsafe URLs stay inert');
+  assert.equal(externalImageRequests.length, 0, 'Markdown images never initiate external requests');
+  const safeLink = markdownMessage.locator('a[href="https://example.org/docs"]');
+  assert.equal(await safeLink.getAttribute('target'), '_blank');
+  assert.ok((await safeLink.getAttribute('rel')).includes('noopener'));
+  const codeSource = 'const exact = "  spaces  ";\n';
+  assert.equal(await markdownMessage.locator('.markdown-code code').textContent(), codeSource);
+  await markdownMessage.locator('.markdown-copy-code').click();
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), codeSource, 'Copy keeps exact fenced source');
+  messages[79] = { ...messages[79], version: 4, content: safe('Частичная версия\n\n```ts\nconst pending = true;') };
+  await page.getByTestId('refresh-current').click();
+  await poll(async () => assert.ok((await markdownMessage.innerText()).includes('const pending = true;')), 'Partial fence update renders safely');
+  messages[79] = { ...messages[79], version: 5, content: safe(gfmFixture) };
+  await page.getByTestId('refresh-current').click();
+  await poll(async () => assert.equal(await markdownMessage.locator('h1').innerText(), 'Проверка GFM'), 'Final message version replaces partial DOM');
+  assert.equal(await page.getByTestId(`message-${id(179)}`).count(), 1, 'Message versions do not duplicate DOM');
+  await markdownMessage.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: join(out, 'hl311-markdown-actions-qhd.png') });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await markdownMessage.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: join(out, 'hl311-markdown-actions-390.png') });
+  await page.setViewportSize({ width: 2560, height: 1440 });
   assert.equal(detailFetches, 0, 'Tool details must load lazily');
-  await page.getByTestId(`tool-call-${toolId}`).click();
+  await page.getByTestId(`inline-tool-call-${toolId}`).click();
   await page.getByTestId('tool-details').waitFor();
   await page.getByTestId('tool-details').getByText('Поток вывода', { exact: false }).click();
   await page.getByRole('button', { name: 'Загрузить ещё вывод', exact: true }).click();
@@ -136,7 +207,11 @@ try {
   assert.ok(await page.getByTestId(before).count());
   await poll(async () => assert.ok(await scroller.evaluate(el => el.scrollTop) > 0), 'Older load must retain visual anchor');
   await scroller.evaluate(el => { el.style.scrollBehavior = 'auto'; el.scrollTop = el.scrollHeight; });
-  await page.getByTestId(`tool-call-${toolId}`).click();
+  const reloadedInlineTool = page.getByTestId(`inline-tool-call-${toolId}`);
+  await reloadedInlineTool.waitFor({ state: 'attached' });
+  const reloadedGroup = reloadedInlineTool.locator('xpath=ancestor::details');
+  if (await reloadedGroup.getAttribute('open') === null) await reloadedGroup.locator('summary').click();
+  await reloadedInlineTool.click();
   await page.getByTestId('tool-details').waitFor();
   await page.screenshot({ path: join(out, 'dialogs-fixture-qhd.png'), fullPage: true });
   await page.getByTestId('message-input').focus();
@@ -177,7 +252,9 @@ try {
   await poll(async () => assert.ok(historyFetches > beforeReconnect), 'Realtime reconnect refetches persisted history');
   assert.equal(posts, 1, 'Realtime reconnect never submits a command');
   assert.ok(await page.getByTestId(`message-${id(1000)}`).count(), 'Reconnect retains older loaded history');
-  await page.getByTestId(`tool-call-${toolId}`).click();
+  await reloadedInlineTool.waitFor({ state: 'attached' });
+  if (await reloadedGroup.getAttribute('open') === null) await reloadedGroup.locator('summary').click();
+  await reloadedInlineTool.click();
   await page.getByTestId('tool-details').waitFor();
   await page.setViewportSize({ width: 390, height: 844 });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 390);
@@ -202,8 +279,8 @@ try {
   await page.getByTestId('nav-work').click();
   await poll(async () => assert.equal(await page.locator('app-dialogs').isVisible(), false), 'Hidden dialogs must not leak into other screens');
   assert.deepEqual(runtimeErrors, []);
-  await writeFile(join(out, 'dialogs-ui-evidence.json'), JSON.stringify({ mode: 'controlled public API DTO fixtures; not provider execution', posts, detailFetches, historyFetches, providerCalls: 0, checks: ['safe code/text', 'lazy details', 'retained data/draft', 'older-page anchor', '60-message catch-up and no forced scroll', 'blocked auth preserves history', 'tool output continuation', 'keyboard', 'pending IDs only', 'reload receipt no replay', 'QHD/390/laptop'] }, null, 2));
-  console.log('PASS controlled UI fixtures: lazy tools, safe output, pagination anchor, retained errors/draft, keyboard, lost ACK/reload readback without replay, responsive screenshots.');
+  await writeFile(join(out, 'dialogs-ui-evidence.json'), JSON.stringify({ mode: 'controlled public API DTO fixtures; not provider execution', posts, detailFetches, historyFetches, providerCalls: 0, checks: ['four request/attempt-scoped activity groups including failed retry without response', 'live activity before response', 'exact response anchor', 'lazy details', 'older inline detail/output pagination outside current inspector page', 'safe GFM structures', 'partial-to-final message versions without duplicate DOM', 'raw HTML and dangerous URL inert', 'no external Markdown image requests', 'exact fenced-source copy', 'long code/table local overflow', 'retained data/draft', 'older-page anchor', '60-message catch-up and no forced scroll', 'reconnect refetch without command replay', 'blocked auth preserves history', 'tool output continuation', 'keyboard focus', 'pending IDs only', 'reload receipt no replay', 'QHD/390/laptop screenshots'] }, null, 2));
+  console.log('PASS HL-311 controlled DTO fixtures: scoped inline activities, safe/versioned GFM, lazy details, reconnect/scroll retention, security checks and responsive screenshots; zero provider calls.');
 } catch (error) {
   await page.screenshot({ path: join(out, 'dialogs-ui-failure.png'), fullPage: true }).catch(() => {});
   console.error(error.message);
