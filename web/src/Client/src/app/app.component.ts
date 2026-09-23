@@ -6,7 +6,7 @@ import { Centrifuge, Subscription } from 'centrifuge';
 import { User, UserManager, WebStorageStateStore } from 'oidc-client-ts';
 import { runtimeConfig } from './runtime-config';
 import { DialogsComponent } from './dialogs/dialogs.component';
-import { ProviderAuthComponent } from './provider-auth.component';
+import { ProviderAuthComponent, ProviderAuthSnapshot, providerAuthStateClass, providerAuthStateLabel } from './provider-auth.component';
 import { MarkdownRendererComponent } from './markdown/markdown-renderer.component';
 import { UiIconComponent } from './ui-icon.component';
 import { firstValueFrom } from 'rxjs';
@@ -195,6 +195,9 @@ export class AppComponent implements OnInit, OnDestroy {
   readonly notice = signal('');
   readonly connections = signal<Connection[]>([]);
   readonly nodes = signal<NodeProjection[]>([]);
+  readonly providerAuthSnapshots = signal<Record<string, ProviderAuthSnapshot>>({});
+  readonly providerAuthLoading = signal<Record<string, boolean>>({});
+  readonly providerAuthFailures = signal<Record<string, boolean>>({});
   readonly work = signal<WorkProjection[]>([]);
   readonly history = signal<HistoryProjection[]>([]);
   readonly realtimeState = signal('Подключение…');
@@ -246,6 +249,8 @@ export class AppComponent implements OnInit, OnDestroy {
   private readonly queuedResources = new Set<RefreshTarget>();
   private historyToolsLoadRevision = 0;
   private historyToolDetailRevision = 0;
+  private providerAuthLoadRevision = 0;
+  private providerAuthLoadTimer?: number;
   private lastHistoryToolSelection: ToolActivitySelection | null = null;
   private readonly users = new UserManager({
     authority: runtimeConfig.oidcAuthority,
@@ -305,6 +310,7 @@ export class AppComponent implements OnInit, OnDestroy {
     if (this.refreshTimer) window.clearTimeout(this.refreshTimer);
     if (this.clockTimer) window.clearInterval(this.clockTimer);
     if (this.renewalRetryTimer) window.clearTimeout(this.renewalRetryTimer);
+    if (this.providerAuthLoadTimer) window.clearTimeout(this.providerAuthLoadTimer);
     this.unregisterAuthEvents();
     this.subscription?.unsubscribe();
     this.centrifuge?.disconnect();
@@ -456,6 +462,7 @@ export class AppComponent implements OnInit, OnDestroy {
       next: value => {
         this.connections.set(value);
         this.finishLoad('connections');
+        this.scheduleProviderAuthLoad();
       },
       error: error => {
         this.handleHttpError('connections', error, undefined, true);
@@ -567,6 +574,28 @@ export class AppComponent implements OnInit, OnDestroy {
     return { connection, projection: this.nodes().find(item => item.connectionId === connection.id) ?? null };
   }
   selectedConnection(): Connection | null { return this.connections().find(item => item.id === this.selectedConnectionId()) ?? null; }
+
+  providerAuthLabel(item: ManagedNodeRow): string {
+    if (!this.canManageConnections()) return 'Нет доступа';
+    if (item.connection.identityStatus !== 'unique' || !item.connection.observation.nodeId || item.connection.observation.compatibility !== 'compatible') return 'Не проверено';
+    const snapshot = this.providerAuthSnapshots()[item.connection.id];
+    if (snapshot?.nodeId === item.connection.observation.nodeId) return providerAuthStateLabel(snapshot.state);
+    if (this.providerAuthLoading()[item.connection.id]) return 'Проверка…';
+    return this.providerAuthFailures()[item.connection.id] ? 'Недоступно' : 'Не проверено';
+  }
+
+  providerAuthClass(item: ManagedNodeRow): string {
+    if (!this.canManageConnections() || item.connection.identityStatus !== 'unique' || !item.connection.observation.nodeId || item.connection.observation.compatibility !== 'compatible') return 'unknown';
+    const snapshot = this.providerAuthSnapshots()[item.connection.id];
+    if (snapshot?.nodeId === item.connection.observation.nodeId) return providerAuthStateClass(snapshot.state);
+    return this.providerAuthFailures()[item.connection.id] ? 'offline' : 'unknown';
+  }
+
+  acceptProviderAuthSnapshot(connectionId: string, snapshot: ProviderAuthSnapshot): void {
+    this.providerAuthSnapshots.update(current => ({ ...current, [connectionId]: snapshot }));
+    this.providerAuthLoading.update(current => ({ ...current, [connectionId]: false }));
+    this.providerAuthFailures.update(current => ({ ...current, [connectionId]: false }));
+  }
 
   workTitle(item: WorkProjection): string { return item.requestTitle ?? item.title ?? item.dialogTitle ?? 'Обращение без названия'; }
   historyTitle(item: HistoryRow): string {
@@ -922,7 +951,10 @@ export class AppComponent implements OnInit, OnDestroy {
     if (!headers || !this.beginLoad(kind, showLoading)) return;
     this.http.get<NodeProjection[] | WorkProjection[] | HistoryProjection[]>(`/api/projections/${kind}`, { headers }).subscribe({
       next: value => {
-        if (kind === 'nodes') this.nodes.set(value as NodeProjection[]);
+        if (kind === 'nodes') {
+          this.nodes.set(value as NodeProjection[]);
+          this.scheduleProviderAuthLoad();
+        }
         else if (kind === 'work') this.work.set(value as WorkProjection[]);
         else this.history.set(value as HistoryProjection[]);
         this.finishLoad(kind);
@@ -978,6 +1010,50 @@ export class AppComponent implements OnInit, OnDestroy {
     this.users.events.removeSilentRenewError(this.onSilentRenewError);
     document.removeEventListener('visibilitychange', this.onVisibilityChange);
     window.removeEventListener('online', this.onOnline);
+  }
+
+  private scheduleProviderAuthLoad(): void {
+    if (this.providerAuthLoadTimer) window.clearTimeout(this.providerAuthLoadTimer);
+    this.providerAuthLoadTimer = window.setTimeout(() => {
+      this.providerAuthLoadTimer = undefined;
+      void this.loadProviderAuthStates();
+    }, 0);
+  }
+
+  private async loadProviderAuthStates(): Promise<void> {
+    const headers = this.headers();
+    const revision = ++this.providerAuthLoadRevision;
+    if (!headers || !this.canManageConnections()) {
+      this.providerAuthSnapshots.set({});
+      this.providerAuthLoading.set({});
+      this.providerAuthFailures.set({});
+      return;
+    }
+    const eligible = this.managedNodes().filter(item =>
+      item.connection.identityStatus === 'unique' && !!item.connection.observation.nodeId && item.connection.observation.compatibility === 'compatible');
+    const loading = { ...this.providerAuthLoading() };
+    const failures = { ...this.providerAuthFailures() };
+    for (const item of eligible) {
+      if (!this.providerAuthSnapshots()[item.connection.id]) loading[item.connection.id] = true;
+      failures[item.connection.id] = false;
+    }
+    this.providerAuthLoading.set(loading);
+    this.providerAuthFailures.set(failures);
+    await Promise.all(eligible.map(async item => {
+      const nodeId = item.connection.observation.nodeId!;
+      try {
+        const snapshot = await firstValueFrom(this.http.get<ProviderAuthSnapshot>(
+          `/api/connections/${encodeURIComponent(item.connection.id)}/provider-auth`,
+          { headers, params: new HttpParams().set('nodeId', nodeId).set('configEpoch', item.connection.configEpoch) }
+        ));
+        if (revision !== this.providerAuthLoadRevision) return;
+        this.acceptProviderAuthSnapshot(item.connection.id, snapshot);
+      } catch {
+        if (revision !== this.providerAuthLoadRevision) return;
+        this.providerAuthLoading.update(current => ({ ...current, [item.connection.id]: false }));
+        this.providerAuthFailures.update(current => ({ ...current, [item.connection.id]: true }));
+      }
+    }));
   }
 
   private async resumeAuthenticatedApp(): Promise<void> {
@@ -1058,6 +1134,10 @@ export class AppComponent implements OnInit, OnDestroy {
     this.centrifuge?.disconnect();
     this.centrifuge = undefined;
     this.canManageConnections.set(false);
+    this.providerAuthLoadRevision++;
+    this.providerAuthSnapshots.set({});
+    this.providerAuthLoading.set({});
+    this.providerAuthFailures.set({});
     this.sessionNotice.set('');
     this.authError.set(message);
     this.user.set(null);

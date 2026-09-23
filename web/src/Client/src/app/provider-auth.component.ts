@@ -1,6 +1,6 @@
 import { CommonModule } from '@angular/common';
 import { HttpClient, HttpErrorResponse, HttpHeaders } from '@angular/common/http';
-import { Component, Input, OnChanges, OnDestroy, signal } from '@angular/core';
+import { Component, EventEmitter, Input, OnChanges, OnDestroy, Output, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 
 interface AuthOperation {
@@ -8,25 +8,36 @@ interface AuthOperation {
   reasonCode: string | null; verificationUrl: string | null; userCode: string | null;
   expiresAt: string | null; timeoutAt: string | null;
 }
-interface AuthSnapshot {
+export interface ProviderAuthSnapshot {
   nodeId: string; revision: number; state: string; checkedAt: string | null; reasonCode: string | null;
   capabilities: { methods: string[]; canCheck: boolean; canLogout: boolean };
   operation: AuthOperation | null;
 }
 
+export function providerAuthStateLabel(value: string): string {
+  return ({ unknown: 'Не подтверждена', unauthenticated: 'Вход не выполнен', authenticated: 'Вход подтверждён', reauthentication_required: 'Нужен повторный вход' } as Record<string,string>)[value] ?? 'Неизвестно';
+}
+
+export function providerAuthStateClass(value: string): string {
+  return value === 'authenticated' ? 'ready' : value === 'unauthenticated' || value === 'reauthentication_required' ? 'attention' : 'unknown';
+}
+
 @Component({
   selector: 'provider-auth', standalone: true, imports: [CommonModule, FormsModule],
   template: `
-    <section class="provider-auth" data-testid="provider-auth" aria-labelledby="provider-auth-title">
-      <h3 id="provider-auth-title">Вход у провайдера</h3>
+    <section class="provider-auth inspector-card" data-testid="provider-auth" aria-labelledby="provider-auth-title">
+      <div class="inspector-section-head provider-auth-head">
+        <div><h3 id="provider-auth-title">Вход у провайдера</h3><p>Учётная запись, которой пользуется исполнитель.</p></div>
+        <span *ngIf="snapshot() as auth" [class]="'status ' + stateClass(auth.state)">{{ stateLabel(auth.state) }}</span>
+      </div>
       <p *ngIf="!canManage" class="muted">Доступно пользователям с правом управления подключениями.</p>
       <ng-container *ngIf="canManage">
         <p *ngIf="!nodeId || conflict" class="muted">Сначала требуется подтверждённая уникальная нода.</p>
         <p *ngIf="loading()" role="status">Проверка состояния…</p>
         <p *ngIf="error()" class="error" role="alert">{{ error() }}</p>
         <ng-container *ngIf="snapshot() as auth">
-          <dl><dt>Авторизация</dt><dd data-testid="provider-auth-state">{{ stateLabel(auth.state) }}</dd>
-            <dt>Проверено</dt><dd>{{ auth.checkedAt ? (auth.checkedAt | date:'dd.MM HH:mm:ss') : 'Не проверено' }}</dd></dl>
+          <dl class="provider-auth-facts"><dt>Авторизация</dt><dd data-testid="provider-auth-state">{{ stateLabel(auth.state) }}</dd>
+            <dt>Последняя проверка</dt><dd>{{ auth.checkedAt ? (auth.checkedAt | date:'dd.MM HH:mm:ss') : 'Не проверено' }}</dd></dl>
           <p *ngIf="auth.reasonCode" class="hint">{{ reasonLabel(auth.reasonCode) }}</p>
           <ng-container *ngIf="auth.operation as op">
             <p data-testid="provider-operation-state" role="status">{{ operationLabel(op.status) }}</p>
@@ -44,13 +55,13 @@ interface AuthSnapshot {
             </div>
           </ng-container>
           <p *ngIf="!auth.capabilities.methods.length" class="hint">Управляемый вход не поддерживается этой нодой.</p>
-          <div *ngIf="auth.operation?.status!=='pending' && !uncertain()">
+          <div class="provider-auth-entry" *ngIf="auth.operation?.status!=='pending' && !uncertain()">
             <form *ngIf="auth.capabilities.methods.includes('secret')" (ngSubmit)="start('secret')" autocomplete="off">
               <label>Секрет провайдера<input data-testid="provider-secret" type="password" name="providerSecret" [(ngModel)]="secret" autocomplete="new-password" maxlength="16384" spellcheck="false" [disabled]="busy()"></label>
               <p class="hint">Текущее значение не отображается. Пустое поле его не изменяет.</p>
               <button data-testid="provider-start-secret" type="submit" [disabled]="busy() || !secret.trim()">{{ auth.state==='authenticated' ? 'Заменить секрет' : 'Авторизовать' }}</button>
             </form>
-            <button *ngIf="auth.capabilities.methods.includes('device_code')" data-testid="provider-start-device" type="button" (click)="start('device_code')" [disabled]="busy()">{{ auth.state==='authenticated' ? 'Повторить вход' : 'Авторизовать' }}</button>
+            <button *ngIf="auth.capabilities.methods.includes('device_code')" class="provider-auth-primary" data-testid="provider-start-device" type="button" (click)="start('device_code')" [disabled]="busy()">{{ auth.state==='authenticated' ? 'Повторить вход' : 'Авторизовать' }}</button>
           </div>
           <div class="actions">
             <button *ngIf="auth.capabilities.canCheck" data-testid="provider-check" type="button" (click)="command('check')" [disabled]="busy() || uncertain()">Проверить</button>
@@ -78,7 +89,8 @@ export class ProviderAuthComponent implements OnChanges, OnDestroy {
   @Input() accessToken = '';
   @Input() canManage = false;
   @Input() conflict = false;
-  readonly snapshot = signal<AuthSnapshot | null>(null);
+  @Output() readonly snapshotChange = new EventEmitter<ProviderAuthSnapshot>();
+  readonly snapshot = signal<ProviderAuthSnapshot | null>(null);
   readonly error = signal(''); readonly busy = signal(false); readonly loading = signal(false);
   readonly uncertain = signal(false); readonly confirmLogout = signal(false);
   secret = '';
@@ -108,7 +120,7 @@ export class ProviderAuthComponent implements OnChanges, OnDestroy {
     this.reading = true;
     const generation = this.generation;
     if (showLoading) this.loading.set(true);
-    this.http.get<AuthSnapshot>(this.base(), { headers: this.headers(), params: { nodeId: this.nodeId, configEpoch: this.configEpoch } }).subscribe({
+    this.http.get<ProviderAuthSnapshot>(this.base(), { headers: this.headers(), params: { nodeId: this.nodeId, configEpoch: this.configEpoch } }).subscribe({
       next: value => {
         if (generation !== this.generation) return;
         this.accept(value); this.loading.set(false); this.reading = false; this.error.set('');
@@ -120,9 +132,10 @@ export class ProviderAuthComponent implements OnChanges, OnDestroy {
       error: failure => { if (generation === this.generation) { this.loading.set(false); this.reading = false; this.error.set(this.failureLabel(failure)); } }
     });
   }
-  private accept(value: AuthSnapshot): void {
+  private accept(value: ProviderAuthSnapshot): void {
     if (value.nodeId !== this.nodeId || (this.snapshot()?.revision ?? -1) > value.revision) return;
     this.snapshot.set(value);
+    this.snapshotChange.emit(value);
   }
   start(method: string): void {
     if (this.busy() || this.uncertain() || (method === 'secret' && !this.secret.trim())) return;
@@ -141,7 +154,7 @@ export class ProviderAuthComponent implements OnChanges, OnDestroy {
     if (this.busy() || !this.nodeId || !this.canManage) return;
     this.busy.set(true); this.error.set(''); this.confirmLogout.set(false);
     const generation = this.generation; const commandId = retryId ?? crypto.randomUUID(); this.pendingCommand = commandId; this.pendingAction = action; this.pendingMethod = extra['method'];
-    this.http.post<AuthSnapshot>(this.base() + '/' + action, { nodeId: this.nodeId, commandId, ...extra },
+    this.http.post<ProviderAuthSnapshot>(this.base() + '/' + action, { nodeId: this.nodeId, commandId, ...extra },
       { headers: this.headers(), params: { configEpoch: this.configEpoch } }).subscribe({
       next: value => { if (generation === this.generation) { this.accept(value); this.busy.set(false); this.uncertain.set(false); } },
       error: (failure: HttpErrorResponse) => {
@@ -155,7 +168,8 @@ export class ProviderAuthComponent implements OnChanges, OnDestroy {
     try { const url = new URL(value ?? ''); return url.protocol === 'https:' && !url.username && !url.password ? url.href : null; }
     catch { return null; }
   }
-  stateLabel(value: string): string { return ({ unknown: 'Не подтверждена', unauthenticated: 'Вход не выполнен', authenticated: 'Вход подтверждён', reauthentication_required: 'Нужен повторный вход' } as Record<string,string>)[value] ?? 'Неизвестно'; }
+  stateLabel(value: string): string { return providerAuthStateLabel(value); }
+  stateClass(value: string): string { return providerAuthStateClass(value); }
   operationLabel(value: string): string { return ({ pending: 'Ожидаем завершения входа', succeeded: 'Вход подтверждён', failed: 'Вход не завершён', cancelled: 'Вход отменён', expired: 'Время ожидания истекло' } as Record<string,string>)[value] ?? 'Состояние неизвестно'; }
   reasonLabel(value: string): string { return ({ busy: 'Нода выполняет работу. Дождитесь её завершения.', cancelled: 'Попытка отменена. Можно начать новый вход.', verification_failed: 'Подтверждение аккаунта не получено.', provider_operation_missing: 'Провайдер больше не видит эту попытку. Повторите вход.', invalid_secret: 'Секрет не принят провайдером.', credential_rejected: 'Провайдер отклонил авторизацию.', unsupported_version: 'Установленная версия не поддерживает этот способ входа.', provider_unavailable: 'Проверка провайдера сейчас недоступна.', restarted: 'Нода перезапущена. Начните новую попытку.', interrupted_by_restart: 'Нода перезапущена. Начните новую попытку.', managed_auth_required: 'Нужен вход через аккаунт провайдера.', provider_protocol_error: 'Версия провайдера вернула неподдерживаемый ответ.', pending_operation: 'На ноде уже идёт вход.', timeout: 'Истёк таймаут попытки.', expired: 'Время ожидания истекло.', unauthenticated: 'Требуется вход у провайдера.' } as Record<string,string>)[value] ?? 'Результат требует проверки состояния.'; }
   private failureLabel(failure: HttpErrorResponse): string {
