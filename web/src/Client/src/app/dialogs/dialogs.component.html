@@ -149,26 +149,6 @@
         </header>
 
         @if (contextError()) { <p class="execution-error" role="alert">{{ contextError() }}</p> }
-        <section class="execution-strip" aria-label="Навигация по выполнению">
-          <div class="execution-strip-title">
-            <ui-icon name="tool" />
-            <span><strong>Выполнение</strong><small>операции раскрываются в хронологии ниже</small></span>
-          </div>
-          <label><span><ui-icon name="request" />Запрос</span>
-            <select data-testid="request-select" [ngModel]="selectedRequestId()" (ngModelChange)="selectRequestById($event)" [disabled]="!requests().length">
-              @for (request of requests(); track request.requestId) { <option [value]="request.requestId">#{{ request.queueSequence }} · {{ requestStatusLabel(request.status) }}</option> }
-            </select>
-          </label>
-          <label><span><ui-icon name="attempt" />Попытка</span>
-            <select [ngModel]="selectedAttemptId()" (ngModelChange)="selectAttemptById($event)" [disabled]="!attempts().length">
-              @for (attempt of attempts(); track attempt.attemptId) { <option [value]="attempt.attemptId">{{ attempt.generation }} · {{ requestStatusLabel(attempt.state) }}</option> }
-            </select>
-          </label>
-          <div class="execution-pagination">
-            @if (requestNextCursor()) { <button type="button" (click)="loadMoreRequests()" [disabled]="requestMoreLoading()">{{ requestMoreLoading() ? 'Загрузка…' : 'Ещё запросы' }}</button> }
-            @if (attemptNextCursor()) { <button type="button" (click)="loadMoreAttempts()" [disabled]="contextLoading()">Ещё попытки</button> }
-          </div>
-        </section>
 
         @if (historyError()) {
           <div class="read-error" role="alert">
@@ -224,14 +204,55 @@
               <header>
                 <strong>{{ message.role === 'user' ? 'Вы' : 'Harness' }}</strong>
                 @if (message.role === 'user') {
-                  <button type="button" class="message-context" (click)="selectMessageRequest(message)">
-                    {{ requestStatusLabel(message.disposition) }}
-                  </button>
+                  <span>{{ requestStatusLabel(message.disposition) }}</span>
                 }
                 <time [attr.datetime]="message.createdAt">{{ formatTime(message.createdAt) }}</time>
               </header>
               @if (message.role === 'user') {
                 <p class="message-text">{{ message.text }}</p>
+                <div class="message-execution">
+                  <button type="button" class="message-context"
+                    [attr.aria-expanded]="selectedRequestId() === message.requestId"
+                    [attr.aria-controls]="'execution-' + message.messageId"
+                    (click)="selectMessageRequest(message)">
+                    <ui-icon name="tool" />Выполнение
+                    <span aria-hidden="true">{{ selectedRequestId() === message.requestId ? '▴' : '▾' }}</span>
+                  </button>
+                  @if (selectedRequestId() === message.requestId) {
+                    <section class="message-execution-detail" [id]="'execution-' + message.messageId" aria-label="Выполнение сообщения">
+                      @if (contextLoading()) { <p role="status">Загрузка попыток…</p> }
+                      @if (executionError()) {
+                        <p role="alert">{{ executionError() }}</p>
+                        <button type="button" (click)="selectRequest(message)">Повторить загрузку</button>
+                      }
+                      @if (attempts().length > 1) {
+                        <label>Попытка
+                          <select [ngModel]="selectedAttemptId()" (ngModelChange)="selectAttemptById($event)">
+                            @for (attempt of attempts(); track attempt.attemptId) {
+                              <option [value]="attempt.attemptId">{{ attempt.generation }} · {{ requestStatusLabel(attempt.state) }}</option>
+                            }
+                          </select>
+                        </label>
+                      }
+                      @if (selectedAttempt(); as attempt) {
+                        <dl>
+                          <dt>Состояние</dt><dd>{{ requestStatusLabel(attempt.state) }}</dd>
+                          @if (attempt.startedAt) { <dt>Начало</dt><dd><time [attr.datetime]="attempt.startedAt">{{ formatTime(attempt.startedAt) }}</time></dd> }
+                          @if (attempt.finishedAt) { <dt>Окончание</dt><dd><time [attr.datetime]="attempt.finishedAt">{{ formatTime(attempt.finishedAt) }}</time></dd> }
+                        </dl>
+                        @if (attemptLoading()) { <p role="status">Загрузка действий…</p> }
+                        @else if (!executionError()) {
+                          @if (hasAttemptActivity(attempt.attemptId)) {
+                            <button type="button" (click)="showAttemptActivity(attempt.attemptId)">Показать действия в переписке</button>
+                          } @else { <p>Для этой попытки действия не зарегистрированы.</p> }
+                        }
+                      } @else if (!contextLoading() && !executionError()) { <p>Выполнение ещё не началось.</p> }
+                      @if (attemptNextCursor()) {
+                        <button type="button" (click)="loadMoreAttempts()" [disabled]="contextLoading()">Показать более ранние попытки</button>
+                      }
+                    </section>
+                  }
+                </div>
               } @else if (message.content.kind === 'inline') {
                 <app-markdown-renderer
                   [identity]="message.messageId"
