@@ -198,27 +198,38 @@
             }
             <article
               class="message"
+              [class.failed-message]="message.role === 'user' && ['failed', 'interrupted', 'unknown'].includes(messageStatus(message))"
               [class.user-message]="message.role === 'user'"
               [class.assistant-message]="message.role === 'assistant'"
               [attr.data-testid]="'message-' + message.messageId">
               <header>
                 <strong>{{ message.role === 'user' ? 'Вы' : 'Harness' }}</strong>
                 @if (message.role === 'user') {
-                  <span>{{ requestStatusLabel(message.disposition) }}</span>
+                  <span>{{ requestStatusLabel(messageStatus(message)) }}</span>
                 }
                 <time [attr.datetime]="message.createdAt">{{ formatTime(message.createdAt) }}</time>
               </header>
               @if (message.role === 'user') {
                 <p class="message-text">{{ message.text }}</p>
+                @if (messageFailure(message)) { <p class="retry-reason" role="status">{{ messageFailure(message) }}</p> }
+                @if (messageStatus(message) === 'failed' && identities()[dialog.connectionId]?.adapter?.kind === 'cursor' && !canRetryMessage(message)) {
+                  <p class="content-note">Cursor допускает безопасный повтор только последнего сообщения: для более ранних сообщений нет подтверждения сохранённого контекста.</p>
+                }
+                @if (canRetryMessage(message)) {
+                  <div class="retry-controls">
+                  <button type="button" class="message-context" data-testid="retry-message" (click)="retryMessages(false)" [disabled]="retrying() || sending()">Повторить сообщение</button>
+                  @if (retryTail().length > 1) { <button type="button" class="message-context" data-testid="retry-series" (click)="retryMessages(true)" [disabled]="retrying() || sending()">Повторить серию ({{ retryTail().length }}) по порядку</button> }
+                  </div>
+                }
                 <div class="message-execution">
                   <button type="button" class="message-context"
-                    [attr.aria-expanded]="selectedRequestId() === message.requestId"
+                    [attr.aria-expanded]="isMessageSelected(message)"
                     [attr.aria-controls]="'execution-' + message.messageId"
                     (click)="selectMessageRequest(message)">
                     <ui-icon name="tool" />Выполнение
-                    <span aria-hidden="true">{{ selectedRequestId() === message.requestId ? '▴' : '▾' }}</span>
+                    <span aria-hidden="true">{{ isMessageSelected(message) ? '▴' : '▾' }}</span>
                   </button>
-                  @if (selectedRequestId() === message.requestId) {
+                  @if (isMessageSelected(message)) {
                     <section class="message-execution-detail" [id]="'execution-' + message.messageId" aria-label="Выполнение сообщения">
                       @if (contextLoading()) { <p role="status">Загрузка попыток…</p> }
                       @if (executionError()) {
@@ -300,6 +311,8 @@
           }
         </div>
 
+        @if (retryProgress()) { <p class="retry-progress" role="status">{{ retryProgress() }}</p> }
+        @if (retryBoundExplanation()) { <p class="content-note">{{ retryBoundExplanation() }}</p> }
         <div class="composer">
           <label for="message-input">Сообщение</label>
           <textarea
@@ -318,7 +331,7 @@
               class="primary"
               data-testid="send-message"
               (click)="sendMessage()"
-              [disabled]="sending() || !draft.trim() || !canWriteSelected()"
+              [disabled]="sending() || retrying() || !draft.trim() || !canWriteSelected()"
               [attr.title]="canWriteSelected() ? null : sendDisabledReason()">
               {{ sending() ? 'Отправляется…' : 'Отправить' }}
             </button>

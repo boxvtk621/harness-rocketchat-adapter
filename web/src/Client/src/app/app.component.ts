@@ -92,6 +92,8 @@ interface WorkProjection {
   dialogId: string;
   title?: string | null;
   requestTitle?: string | null;
+  inputMessageId?: string | null;
+  failureReason?: string | null;
   dialogTitle?: string | null;
   status: string;
   effectStatus?: string | null;
@@ -136,6 +138,8 @@ interface HistoryProjection {
   requestId?: string | null;
   title: string | null;
   requestTitle?: string | null;
+  inputMessageId?: string | null;
+  failureReason?: string | null;
   status?: string | null;
   effectStatus?: string | null;
   dialogVersion: number;
@@ -149,6 +153,7 @@ interface HistoryProjection {
 }
 
 interface HistoryRow {
+  failureReason?: string | null;
   key: string;
   connectionId: string;
   nodeId: string;
@@ -520,6 +525,7 @@ export class AppComponent implements OnInit, OnDestroy {
         requestId: dialog.requestId ?? null,
         requestTitle: dialog.requestTitle ?? null,
         dialogTitle: dialog.title,
+        failureReason: dialog.failureReason,
         status: dialog.status ?? 'completed',
         effectStatus: dialog.effectStatus ?? null,
         createdAt: dialog.createdAt,

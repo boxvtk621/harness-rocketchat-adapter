@@ -218,7 +218,7 @@ function Fresh {
     WriteOnce 'client/runtime-config.js' 'window.__HARNESS_CONFIG__={"oidcAuthority":"http://localhost:18787/realms/harness","oidcClientId":"harness-web"};'
     foreach($kind in @('cursor','codex')){
         $cfg=Get-Content (Join-Path $webRoot "infra/harness/$kind-node.json") -Raw|ConvertFrom-Json
-        $cfg.manualDispatchForTesting=$false;$cfg.approvalMode='explicit_once';$cfg.toolManifestFile='/config/tools-explicit.json';$cfg.policyRevision='harness-dev@1';$cfg.$kind.model=if($kind -eq 'cursor'){'composer-2.5'}else{'gpt-5.2-codex'}
+        $cfg.manualDispatchForTesting=$false;$cfg.approvalMode='explicit_once';$cfg.toolManifestFile='/config/tools-explicit.json';$cfg.policyRevision='harness-dev@1';$cfg.$kind.model=if($kind -eq 'cursor'){'composer-2.5'}else{'gpt-6-sol'}
         WriteOnce "harness/$kind-node.json" (($cfg|ConvertTo-Json -Depth 15)+"`n")
         WriteOnce "harness/$kind-tools.json" ('[{"name":"'+$kind+'.command"},{"name":"'+$kind+'.file_change"}]'+"`n")
     }

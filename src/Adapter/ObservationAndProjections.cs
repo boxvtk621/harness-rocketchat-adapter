@@ -149,7 +149,7 @@ public sealed record AttemptProjection(string AttemptId, string RequestId, strin
     long Generation, long Version, string? StartedAt, string? FinishedAt);
 public sealed record HistoryProjection(string ConnectionId, string NodeId, string NodeName, string RequestId,
     string DialogId, string Status, string? Title, long DialogVersion, string? CreatedAt, string? CompletedAt,
-    IReadOnlyList<AttemptProjection> Attempts, IReadOnlyList<MessageProjection> Messages);
+    IReadOnlyList<AttemptProjection> Attempts, IReadOnlyList<MessageProjection> Messages, string? InputMessageId = null, string? FailureReason = null);
 public sealed record MessageProjection(string MessageId, string Role, long Sequence, long Version,
     string CreatedAt, string? Text, JsonElement? Content, string? RequestId, string? AttemptId);
 public sealed class ProjectionUnavailableException(string message) : Exception(message);
@@ -203,7 +203,7 @@ public static class HarnessProjectionReader
             var nodeId = connection.Observation.NodeId!;
             var requests = await ReadAllItemsAsync(connection, client,
                 ["v1", "nodes", nodeId, "requests"], ct);
-            var terminalRequests = requests.Where(x => TerminalRequestStates.Contains(String(x, "status") ?? ""))
+            var terminalRequests = requests.GroupBy(x => String(x, "inputMessageId")).Where(group => group.Any(x => TerminalRequestStates.Contains(String(x, "status") ?? ""))).Select(group => group.OrderByDescending(x => Long(x, "queueSequence")).First())
                 .Where(x => String(x, "requestId") is not null && String(x, "dialogId") is not null).ToList();
             var dialogs = await ReadAllItemsAsync(connection, client,
                 ["v1", "nodes", nodeId, "dialogs"], ct);
@@ -223,8 +223,10 @@ public static class HarnessProjectionReader
                         ["v1", "nodes", nodeId, "dialogs", dialogId, "messages"], ct);
                     messagesByDialog[dialogId] = allMessages;
                 }
-                var attemptItems = await ReadAllItemsAsync(connection, client,
-                    ["v1", "nodes", nodeId, "requests", requestId, "attempts"], ct);
+                var attemptItems = new List<JsonElement>();
+                foreach (var related in requests.Where(x => String(x, "inputMessageId") == inputMessageId))
+                    attemptItems.AddRange(await ReadAllItemsAsync(connection, client,
+                        ["v1", "nodes", nodeId, "requests", String(related, "requestId")!, "attempts"], ct));
                 if (attemptItems.Any(x => String(x, "dialogId") != dialogId))
                     throw new ProjectionUnavailableException("Request attempt belongs to another dialog.");
                 var attempts = attemptItems.Select(ParseAttempt).Where(x => x is not null).Cast<AttemptProjection>().ToList();
@@ -238,12 +240,43 @@ public static class HarnessProjectionReader
                     .OrderByDescending(x => DateTimeOffset.Parse(x.FinishedAt!)).Select(x => x.FinishedAt).FirstOrDefault();
                 result.Add(new(connection.Id, nodeId, connection.Name, requestId, dialogId,
                     String(request, "status")!, String(dialog, "title"), Long(dialog, "version"), createdAt,
-                    completedAt, attempts, ParseMessages(scopedMessages)));
+                    completedAt, attempts, ParseMessages(scopedMessages), inputMessageId, await ReadFailureReason(connection, client, attempts.Where(x => x.RequestId == requestId).OrderByDescending(x => x.Generation).FirstOrDefault(), ct)));
             }
         }
         return result.GroupBy(x => (x.NodeId, x.RequestId)).Select(x => x.First()).ToList();
     }
 
+    private static async Task<string?> ReadFailureReason(Connection connection, IHarnessClient client, AttemptProjection? attempt, CancellationToken ct)
+    {
+        if (attempt is null || attempt.State is not ("failed" or "interrupted" or "unknown")) return null;
+        if (attempt.EffectStatus != "none") return "Возможны побочные эффекты. Перед повтором требуется сверка состояния.";
+        var fallback = attempt.State == "failed" ? "Попытка завершилась ошибкой." : "Выполнение прервано.";
+        // Best-effort bounded enrichment; original history remains available when
+        // diagnostics cannot be read. The public projector strips provider text.
+        const string incomplete = "Диагностика неполная или недоступна. Причина ошибки не подтверждена.";
+        try
+        {
+            long after = 0;
+            string? reason = null;
+            for (var page = 0; page < 5; page++)
+            {
+                var query = new Dictionary<string, string?> { ["limit"] = "100", ["after"] = after.ToString(System.Globalization.CultureInfo.InvariantCulture) };
+                using var document = await client.GetAsync(connection, ["v1", "nodes", connection.Observation.NodeId!, "attempts", attempt.AttemptId, "events"], query, ct);
+                if (document is null) return incomplete;
+                var projected = DialogPublicDto.Project(connection.Observation.NodeId!, ["attempts", attempt.AttemptId, "events"], query, document.RootElement, null);
+                if (projected is null) return incomplete;
+                reason = projected.Value.GetProperty("items").EnumerateArray().Where(item => item.GetProperty("generation").GetInt64() == attempt.Generation)
+                    .OrderByDescending(item => item.GetProperty("seq").GetInt64()).Select(item => item.GetProperty("safeMessage").GetString()).FirstOrDefault() ?? reason;
+                var cursor = projected.Value.GetProperty("nextCursor");
+                if (cursor.ValueKind == JsonValueKind.Null) return reason ?? fallback;
+                if (!long.TryParse(cursor.GetString(), out var next) || next <= after) return incomplete;
+                after = next;
+            }
+            return incomplete;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception) { return incomplete; }
+    }
     private static IEnumerable<Connection> Eligible(IEnumerable<Connection> connections) => connections.Where(x =>
         x.Observation.Compatibility == "compatible" && Guid.TryParse(x.Observation.NodeId, out _));
 

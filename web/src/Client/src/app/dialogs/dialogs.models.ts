@@ -197,7 +197,7 @@ export interface ToolCallPage extends HarnessPage<ToolCallSummary> {
 
 export interface CommandReceipt {
   commandId: string;
-  commandKind: 'dialog.create' | 'message.enqueue';
+  commandKind: 'dialog.create' | 'message.enqueue' | 'attempt.retry';
   receiptId: string;
   acceptedAt: string;
   nodeId: string;
@@ -205,7 +205,8 @@ export interface CommandReceipt {
   result: 'admitted' | 'applied';
   blockingReason?: string;
   references: {
-    dialogId: string;
+    dialogId?: string;
+    priorAttemptId?: string;
     messageId?: string;
     requestId?: string;
   };
@@ -222,7 +223,7 @@ export interface CommandStatus {
 export interface PendingCommand {
   v: 1;
   commandId: string;
-  kind: 'dialog.create' | 'message.enqueue';
+  kind: 'dialog.create' | 'message.enqueue' | 'attempt.retry';
   connectionId: string;
   nodeId: string;
   configEpoch: number;
@@ -231,6 +232,7 @@ export interface PendingCommand {
   adapterKind: string;
   adapterVersion: string;
   dialogId?: string;
+  priorAttemptId?: string;
   canonicalPayloadHash: string;
   intentHash: string;
   createdAt: string;
@@ -246,3 +248,13 @@ export interface DialogListRow extends HarnessDialog {
 }
 
 export const PENDING_COMMAND_STORAGE_PREFIX = 'hl307:pending:';
+
+export interface AttemptFailure {
+  seq: number;
+  attemptId: string;
+  generation: number;
+  type: string;
+  effectStatus: string;
+  errorCode: string;
+  safeMessage: string;
+}

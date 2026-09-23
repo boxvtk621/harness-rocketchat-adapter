@@ -121,7 +121,7 @@
                       <h2 data-testid="history-request-title" class="preserve">{{ historyTitle(item) }}</h2>
                       <p>{{ historyNodeName(item) }} · {{ item.completedAt ? (item.completedAt | date:'dd.MM.yyyy HH:mm') : 'время не подтверждено' }}</p>
                     </div>
-                    <div class="reader-actions"><span [class]="'status ' + statusClass(item.status, item.effectStatus)">{{ statusLabel(item.status, item.effectStatus) }}</span><button type="button" class="icon-label" (click)="openHistoryDialog(item)"><ui-icon name="open" />Открыть в диалоге</button></div>
+                    @if (item.failureReason) { <p role="status">{{ item.failureReason }}</p> }<div class="reader-actions"><span [class]="'status ' + statusClass(item.status, item.effectStatus)">{{ statusLabel(item.status, item.effectStatus) }}</span><button type="button" class="icon-label" (click)="openHistoryDialog(item)"><ui-icon name="open" />Открыть в диалоге</button></div>
                   </header>
                   <section class="history-answer"><h3>Ответ</h3>
                     <app-markdown-renderer *ngIf="historyAnswer(item) as answer; else absentHistoryAnswer" [identity]="historyAnswerIdentity(item)" [version]="historyAnswerVersion(item)" [content]="answer" />

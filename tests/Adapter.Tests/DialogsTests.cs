@@ -19,6 +19,35 @@ public sealed class DialogsTests
     const string Root = "/api/dialogs/connection/nodes/" + Node;
 
     [Fact]
+    public void Retry_is_exact_effect_free_and_receipt_is_bound_to_prior_attempt()
+    {
+        var command = JsonSerializer.SerializeToElement(new { protocolVersion=1, schemaId="harness-wire-v2", commandId=Command,
+            kind="attempt.retry", target=new {nodeId=Node,attemptId=Dialog}, expected=new {attemptGeneration=1}, payload=new {acknowledgeKnownEffects=false} });
+        Assert.True(DialogEndpoints.ValidCommand(command,Node));
+        foreach (var changed in new[] { command.GetRawText().Replace("false","true"), command.GetRawText().Replace("\"attemptGeneration\":1","\"attemptGeneration\":\"bad\""), command.GetRawText().Replace("\"acknowledgeKnownEffects\":false","\"acknowledgeKnownEffects\":false,\"extra\":true") })
+            Assert.False(DialogEndpoints.ValidCommand(JsonDocument.Parse(changed).RootElement,Node));
+        var receipt=JsonSerializer.SerializeToElement(new { protocolVersion=1,schemaId="harness-wire-v2",nodeId=Node,commandId=Command,
+            commandKind="attempt.retry",receiptId=Command,acceptedAt="2026-09-23T00:00:00Z",eventSeq=1,result="admitted",references=new {priorAttemptId=Dialog,requestId=Command,secret="hidden"} });
+        var projected=DialogPublicDto.Project(Node,["commands"],new Dictionary<string,string?>(),receipt,command);
+        Assert.NotNull(projected); Assert.DoesNotContain("hidden",projected.Value.GetRawText());
+        Assert.Equal(Dialog,projected.Value.GetProperty("references").GetProperty("priorAttemptId").GetString());
+        var mismatch=JsonDocument.Parse(receipt.GetRawText().Replace("\"priorAttemptId\":\""+Dialog,"\"priorAttemptId\":\""+Node)).RootElement;
+        Assert.Null(DialogPublicDto.Project(Node,["commands"],new Dictionary<string,string?>(),mismatch,command));
+    }
+
+    [Fact]
+    public void Historical_failure_events_are_scoped_bounded_and_never_relay_provider_text()
+    {
+        var body=JsonSerializer.SerializeToElement(new { protocolVersion=1,schemaId="harness-wire-v2",nodeId=Node,dialogId=Dialog,attemptId=Command,
+            epoch=1,snapshotStateVersion=1,lastEventSeq=9,pageType="events",nextCursor=(string?)null,
+            items=new[] {new {nodeId=Node,dialogId=Dialog,attemptId=Command,seq=9,type="attempt.failed",payload=new {generation=1,effectStatus="none",errorCode="codex_model_unsupported",safeMessage="SECRET provider prompt"}}} });
+        var projected=DialogPublicDto.Project(Node,["attempts",Command,"events"],new Dictionary<string,string?>(),body,null);
+        Assert.NotNull(projected); Assert.DoesNotContain("SECRET",projected.Value.GetRawText());
+        Assert.Equal("codex_model_unsupported",projected.Value.GetProperty("items")[0].GetProperty("errorCode").GetString());
+        Assert.Null(DialogPublicDto.Project(Node,["attempts",Dialog,"events"],new Dictionary<string,string?>(),body,null));
+    }
+
+    [Fact]
     public async Task Auth_and_target_fencing_precede_any_Harness_call()
     {
         await using var app = new DialogFactory();
@@ -29,7 +58,7 @@ public sealed class DialogsTests
         Assert.Equal(HttpStatusCode.BadRequest, (await http.GetAsync(Root + "/dialogs")).StatusCode);
         Assert.Equal(HttpStatusCode.Conflict, (await http.GetAsync(Root + "/dialogs?configEpoch=2")).StatusCode);
         Assert.Equal(HttpStatusCode.Conflict, (await http.GetAsync(Root.Replace(Node, Dialog) + "/dialogs?configEpoch=1")).StatusCode);
-        Assert.Equal(HttpStatusCode.NotFound, (await http.GetAsync(Root + "/attempts/" + Dialog + "/events?configEpoch=1")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await http.GetAsync(Root + "/attempts/" + Dialog + "/raw-events?configEpoch=1")).StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, (await http.GetAsync(Root + "/dialogs?configEpoch=1&limit=101")).StatusCode);
         Assert.Empty(app.Relay.Calls);
     }

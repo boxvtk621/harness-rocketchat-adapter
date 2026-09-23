@@ -11,6 +11,32 @@ runtime находится в `harness-rocketchat-adapter/web/.runtime/dev` ос
 снимки release. Провайдерская авторизация хранится только в persistent volumes.
 Бизнес-настройки меняются через Web/Adapter; файлы runtime служат bootstrap.
 
+### Исправление недоступной bootstrap-модели Codex
+
+`prepare` сохраняет существующий `harness/codex-node.json`: изменение значения
+по умолчанию не меняет модель уже созданного стенда. Если попытка завершилась с
+`codex_model_unsupported`, сначала проверьте свежий каталог
+`GET /v1/nodes/{nodeId}/settings/model-catalog` аутентифицированного провайдера.
+На этом dev 23.09.2026 каталог содержит `gpt-6-sol`; `gpt-5.2-codex` отсутствует.
+Доступность зависит от аккаунта, поэтому имя проверяется перед применением.
+
+Для существующего стенда при согласованном обновлении измените только поле
+`codex.model` в исключённом из Git runtime-файле и выполните `update -Requested`.
+Пример из worktree Adapter для стандартного расположения HomeLab:
+
+```powershell
+$modelConfigPath = Join-Path $HomeLabRoot 'harness-rocketchat-adapter/web/.runtime/dev/harness/codex-node.json'
+$modelConfig = Get-Content -LiteralPath $modelConfigPath -Raw | ConvertFrom-Json
+$modelConfig.codex.model = 'gpt-6-sol' # предварительно подтверждена свежим каталогом
+$modelConfig | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $modelConfigPath -Encoding utf8
+./web/scripts/dev.ps1 update -Requested -HomeLabRoot $HomeLabRoot
+```
+
+Укажите `$HomeLabRoot` явно. Скрипт обновления проверит отсутствие активных,
+неопределённых и ожидающих запросов до остановки сервисов. После запуска проверьте
+готовность ноды, авторизацию и одну новую диагностическую реплику. Исторические
+неудачные сообщения сохраняются; их повтор запускается только явно из диалога.
+
 ## Первичная подготовка и перенос существующего live
 
 ```powershell

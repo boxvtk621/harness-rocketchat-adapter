@@ -189,7 +189,7 @@ public static class DialogEndpoints
         return p is ["identity"] or ["snapshot"] or ["dialogs"] or ["requests"] or ["attempts"] ||
             (p.Length >= 2 && Guid.TryParseExact(p[1], "D", out _) &&
              (p is ["dialogs", _] or ["dialogs", _, "history"] or ["requests", _] or ["attempts", _] or ["commands", _] or
-                   ["attempts", _, "tool-calls"] ||
+                   ["attempts", _, "tool-calls"] or ["attempts", _, "events"] ||
               p is ["attempts", _, "tool-calls", _] && Guid.TryParseExact(p[3], "D", out _)));
     }
 
@@ -197,14 +197,24 @@ public static class DialogEndpoints
     {
         if (c.ValueKind != JsonValueKind.Object || !c.TryGetProperty("commandId", out var id) || id.ValueKind != JsonValueKind.String ||
             !Guid.TryParseExact(id.GetString(), "D", out _) || !c.TryGetProperty("kind", out var kind) || kind.ValueKind != JsonValueKind.String ||
-            kind.GetString() is not ("dialog.create" or "message.enqueue") || !c.TryGetProperty("target", out var target) ||
+            kind.GetString() is not ("dialog.create" or "message.enqueue" or "attempt.retry") || !c.TryGetProperty("target", out var target) ||
             target.ValueKind != JsonValueKind.Object || !target.TryGetProperty("nodeId", out var node) || node.ValueKind != JsonValueKind.String || node.GetString() != nodeId ||
             !c.TryGetProperty("payload", out var payload) || payload.ValueKind != JsonValueKind.Object) return false;
+        if (kind.GetString() == "attempt.retry")
+            return Exact(c, "protocolVersion", "schemaId", "commandId", "kind", "target", "expected", "payload") &&
+                c.GetProperty("protocolVersion").ValueKind == JsonValueKind.Number && c.GetProperty("protocolVersion").TryGetInt32(out var protocol) && protocol == 1 &&
+                c.GetProperty("schemaId").ValueKind == JsonValueKind.String && c.GetProperty("schemaId").GetString() == "harness-wire-v2" &&
+                Exact(target, "nodeId", "attemptId") && target.GetProperty("attemptId").ValueKind == JsonValueKind.String && Guid.TryParseExact(target.GetProperty("attemptId").GetString(), "D", out _) &&
+                Exact(c.GetProperty("expected"), "attemptGeneration") && c.GetProperty("expected").GetProperty("attemptGeneration").ValueKind == JsonValueKind.Number && c.GetProperty("expected").GetProperty("attemptGeneration").TryGetInt64(out var generation) && generation is > 0 and <= 9007199254740991 &&
+                Exact(payload, "acknowledgeKnownEffects") && payload.GetProperty("acknowledgeKnownEffects").ValueKind == JsonValueKind.False;
         var name = kind.GetString() == "dialog.create" ? "title" : "text";
         if (name == "title" && !payload.TryGetProperty("title", out _)) return true;
         return payload.TryGetProperty(name, out var text) && text.ValueKind == JsonValueKind.String &&
             !string.IsNullOrWhiteSpace(text.GetString()) && text.GetString()!.Length <= (name == "title" ? 200 : 16000);
     }
+
+    private static bool Exact(JsonElement value, params string[] names) => value.ValueKind == JsonValueKind.Object &&
+        value.EnumerateObject().Count() == names.Length && names.All(name => value.TryGetProperty(name, out _));
 
     private static IResult Error(int status, string code) => Results.Json(new { code }, statusCode: status);
 }

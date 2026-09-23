@@ -32,6 +32,8 @@ public static class DialogPublicDto
                 Require(body, "commandKind", cmd.GetProperty("kind").GetString()!);
                 if (cmd.GetProperty("target").TryGetProperty("dialogId", out var dialog))
                     Require(body.GetProperty("references"), "dialogId", dialog.GetString()!);
+                if (cmd.GetProperty("kind").GetString() == "attempt.retry")
+                    Require(body.GetProperty("references"), "priorAttemptId", cmd.GetProperty("target").GetProperty("attemptId").GetString()!);
                 return JsonSerializer.SerializeToElement(Copy(body, Receipt));
             }
             if (path is ["commands", var commandId])
@@ -57,6 +59,37 @@ public static class DialogPublicDto
                 Types(body, "epoch:n stateVersion:n lastEventSeq:n capturedAt:s node:o pendingQueue:a activeAttempt:O completeness:s");
                 Types(body.GetProperty("node"), "transportAvailability:s engineReadiness:s occupancy:s queuePaused:b queueVersion:n pendingCount:n blockedReasons:a activeAttemptId:I");
                 return JsonSerializer.SerializeToElement(Copy(body, Envelope + " capturedAt node pendingQueue activeAttempt completeness"));
+            }
+            if (path is ["attempts", var eventAttempt, "events"])
+            {
+                Types(body, "epoch:n snapshotStateVersion:n lastEventSeq:n dialogId:id attemptId:id pageType:s nextCursor:z items:a");
+                Require(body, "attemptId", eventAttempt); Require(body, "pageType", "events");
+                if (body.GetProperty("items").GetArrayLength() > 100) return null;
+                var events = new List<object>();
+                foreach (var item in body.GetProperty("items").EnumerateArray())
+                {
+                    Types(item, "nodeId:id dialogId:id attemptId:id seq:n type:s payload:o");
+                    Require(item, "nodeId", nodeId); Require(item, "attemptId", eventAttempt);
+                    Require(item, "dialogId", body.GetProperty("dialogId").GetString()!);
+                    var type = item.GetProperty("type").GetString();
+                    if (type is not ("attempt.failed" or "attempt.interrupted" or "attempt.unknown")) continue;
+                    var payload = item.GetProperty("payload");
+                    Types(payload, "generation:n effectStatus:s");
+                    var effects = payload.GetProperty("effectStatus").GetString();
+                    if (effects is not ("none" or "known" or "unknown")) return null;
+                    // Error text is provider-controlled even in historical records.
+                    // Publish only fixed explanations for a strict code allowlist.
+                    var unsupported = type == "attempt.failed" && payload.TryGetProperty("errorCode", out var code) &&
+                        code.ValueKind == JsonValueKind.String && code.GetString() == "codex_model_unsupported";
+                    events.Add(new { seq = item.GetProperty("seq").GetInt64(), attemptId = eventAttempt,
+                        generation = payload.GetProperty("generation").GetInt64(), type, effectStatus = effects,
+                        errorCode = unsupported ? "codex_model_unsupported" : type == "attempt.failed" ? "attempt_failed" : type,
+                        safeMessage = unsupported ? "Модель Codex недоступна для этой учётной записи. Выберите доступную модель и повторите сообщение."
+                            : type == "attempt.failed" ? "Попытка завершилась ошибкой." : type == "attempt.interrupted" ? "Выполнение прервано." : "Исход выполнения неизвестен. Требуется сверка состояния." });
+                }
+                var projection = Copy(body, Envelope + " dialogId attemptId pageType nextCursor");
+                projection["items"] = events;
+                return JsonSerializer.SerializeToElement(projection);
             }
             if (path is ["dialogs", var dialogId]) Require(body.GetProperty("dialog"), "dialogId", dialogId);
             if (path is ["requests", var requestId]) Require(body.GetProperty("request"), "requestId", requestId);
@@ -123,7 +156,7 @@ public static class DialogPublicDto
                     "attempt" or "activeAttempt" => Item(value, "attempts", Attempt),
                     "toolCall" => ToolDetail(value),
                     "receipt" => Copy(value, Receipt),
-                    "references" => Copy(value, "dialogId messageId requestId"),
+                    "references" => Copy(value, "dialogId messageId requestId priorAttemptId"),
                     "adapter" => Copy(value, "kind version"),
                     "capabilities" => Copy(value, "chat events tool_results cancel steer_attached session_resume policy_enforcement"),
                     "node" => Copy(value, "transportAvailability engineReadiness occupancy queuePaused queueVersion pendingCount blockedReasons activeAttemptId"),
@@ -218,6 +251,7 @@ public static class DialogPublicDto
         Types(value.GetProperty("references"), value.GetProperty("commandKind").GetString() switch
         {
             "dialog.create" => "dialogId:id", "message.enqueue" => "dialogId:id messageId:id requestId:id",
+            "attempt.retry" => "priorAttemptId:id requestId:id",
             _ => throw new InvalidOperationException()
         });
     }

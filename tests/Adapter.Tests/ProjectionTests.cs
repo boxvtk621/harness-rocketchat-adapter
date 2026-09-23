@@ -9,6 +9,66 @@ public class ProjectionTests
     private const string TerminalDialog = "30000000-0000-4000-8000-000000000001";
     private const string ActiveDialog = "30000000-0000-4000-8000-000000000002";
 
+    [Theory]
+    [InlineData("later", 2)]
+    [InlineData("cap", 5)]
+    [InlineData("throw", 1)]
+    [InlineData("cursor", 1)]
+    public async Task History_failure_diagnostics_paginate_and_preserve_history_when_incomplete(string mode, int expectedReads)
+    {
+        var reads = 0;
+        var client = new ProjectionClient((path, query) =>
+        {
+            if (path[^1] == "events")
+            {
+                reads++;
+                if (mode == "throw") throw new HttpRequestException("diagnostics unavailable");
+                var after = long.Parse(query!["after"]!);
+                Assert.Equal((reads - 1) * 100, after);
+                return JsonSerializer.SerializeToDocument(new { protocolVersion = 1, schemaId = "harness-wire-v2", nodeId = NodeId,
+                    dialogId = TerminalDialog, attemptId = AttemptId(1), epoch = 1, snapshotStateVersion = 1, lastEventSeq = 600,
+                    pageType = "events", nextCursor = mode == "later" && reads == 2 ? null : (mode == "cursor" ? after : after + 100).ToString(),
+                    items = reads == 2 ? new object[] { new { nodeId = NodeId, dialogId = TerminalDialog, attemptId = AttemptId(1), seq = 101,
+                        type = "attempt.failed", payload = new { generation = 1, effectStatus = "none", errorCode = "codex_model_unsupported" } } } : [] });
+            }
+            return path[^1] switch
+            {
+                "requests" => Page([Request(1, "failed", TerminalDialog)], null, "requests"),
+                "dialogs" => Page([Dialog(TerminalDialog)], null, "dialogs"),
+                "attempts" => Page([new { attemptId = AttemptId(1), dialogId = TerminalDialog, requestId = RequestId(1), generation = 1,
+                    version = 1, state = "failed", effectStatus = "none", startedAt = "2026-09-21T00:01:00Z", finishedAt = "2026-09-21T00:02:00Z" }], null, "attempts", TerminalDialog, RequestId(1)),
+                _ => Page([UserInput(1, 1)], null, "history", TerminalDialog)
+            };
+        });
+        var result = Assert.Single(await HarnessProjectionReader.ReadHistoryAsync([Connection()], client, default));
+        Assert.Single(result.Messages);
+        Assert.Equal(expectedReads, reads);
+        Assert.Contains(mode == "later" ? "Модель Codex" : "Диагностика неполная", result.FailureReason);
+    }
+
+    [Theory]
+    [InlineData("completed")]
+    [InlineData("queued")]
+    public async Task History_groups_distinct_retry_requests_by_original_input_and_keeps_prior_attempts(string latestStatus)
+    {
+        const string input = "40000000-0000-4000-8000-000000000001";
+        var client = new ProjectionClient((path, _) => path[^1] switch
+        {
+            "requests" => Page([Request(1, "failed", TerminalDialog), new {requestId=RequestId(2),dialogId=TerminalDialog,inputMessageId=input,status=latestStatus,version=1,queueSequence=3}],null,"requests"),
+            "dialogs" => Page([Dialog(TerminalDialog)],null,"dialogs"),
+            "attempts" when path[^2]==RequestId(1) => Page([Attempt(1,1,TerminalDialog)],null,"attempts",TerminalDialog,RequestId(1)),
+            "attempts" => Page(latestStatus=="queued" ? [] : [Attempt(2,2,TerminalDialog)],null,"attempts",TerminalDialog,RequestId(2)),
+            _ => Page([UserInput(1,1),Message(1,2,1,1),Message(2,3,2,2)],null,"history",TerminalDialog)
+        });
+        var result=Assert.Single(await HarnessProjectionReader.ReadHistoryAsync([Connection()],client,default));
+        Assert.Equal(input,result.InputMessageId);
+        Assert.Equal(RequestId(2),result.RequestId);
+        Assert.Equal(latestStatus,result.Status);
+        Assert.Equal(latestStatus=="queued" ? 1 : 2,result.Attempts.Count);
+        Assert.Single(result.Messages,message=>message.Role=="user");
+        Assert.Null(result.FailureReason);
+    }
+
     [Fact]
     public async Task Work_reads_every_page_and_excludes_terminal_requests()
     {

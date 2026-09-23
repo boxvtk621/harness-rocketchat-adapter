@@ -16,6 +16,7 @@ import {
 import { FormsModule } from '@angular/forms';
 import { firstValueFrom } from 'rxjs';
 import {
+  AttemptFailure,
   CommandReceipt,
   CommandStatus,
   DialogListRow,
@@ -103,6 +104,10 @@ export class DialogsComponent implements OnChanges, OnDestroy {
   readonly requestMoreLoading = signal(false);
   readonly toolLoading = signal(false);
   readonly sending = signal(false);
+  readonly retrying = signal(false);
+  readonly retryProgress = signal('');
+  readonly messageAttempts = signal<Record<string, HarnessAttempt[]>>({});
+  readonly attemptFailures = signal<Record<string, AttemptFailure>>({});
   readonly creating = signal(false);
   readonly listError = signal('');
   readonly historyError = signal('');
@@ -147,6 +152,9 @@ export class DialogsComponent implements OnChanges, OnDestroy {
   private appliedNavigationNonce = 0;
   private applyingNavigationNonce = 0;
   private lastSessionKey = '';
+  private sessionGeneration = 0;
+  private readonly activityRequestStates = new Map<string, string>();
+  private readonly completeDiagnostics = new Set<string>();
   private activityGeneration = 0;
   private readonly activityQueued = new Set<string>();
   private readonly activityInFlight = new Set<string>();
@@ -161,6 +169,10 @@ export class DialogsComponent implements OnChanges, OnDestroy {
     if (changes['sessionKey'] || changes['accessToken']) {
       if (this.sessionKey !== this.lastSessionKey) {
         this.lastSessionKey = this.sessionKey;
+        this.sessionGeneration++;
+        this.retrying.set(false);
+        this.retryProgress.set('');
+        this.reconcilingCommandId.set(null);
         this.restorePendingCommands();
       }
     }
@@ -245,6 +257,13 @@ export class DialogsComponent implements OnChanges, OnDestroy {
     if (successful.length || !errors.length) {
       const failedConnections = new Set(contexts.filter((_, index) => results[index].status === 'rejected').map(item => item.connectionId));
       const retained = previous.filter(dialog => failedConnections.has(dialog.connectionId));
+      // A first-page refresh cannot disprove a selected dialog loaded from a
+      // later page. Keep its view mounted while pagination remains incomplete.
+      const selected = this.selectedDialog();
+      if (selected && this.dialogPages[selected.connectionId]?.nextCursor
+        && contexts.some(context => context.connectionId === selected.connectionId)
+        && !successful.some(dialog => this.dialogKey(dialog) === this.dialogKey(selected))
+        && !retained.some(dialog => this.dialogKey(dialog) === this.dialogKey(selected))) retained.push(selected);
       this.dialogs.set(this.sortDialogs([...successful, ...retained]));
     }
     this.listError.set(errors.join(' '));
@@ -310,6 +329,8 @@ export class DialogsComponent implements OnChanges, OnDestroy {
     this.contextLoading.set(false);
     this.attemptLoading.set(false);
     this.executionError.set('');
+    this.messageAttempts.set({});
+    this.attemptFailures.set({});
     this.messages.set([]);
     this.requests.set([]);
     this.attempts.set([]);
@@ -340,10 +361,7 @@ export class DialogsComponent implements OnChanges, OnDestroy {
           limit: HISTORY_LIMIT,
           order: 'latest'
         }),
-        this.get<HarnessPage<HarnessRequest>>(this.dialogRoute(dialog, 'requests'), dialog.configEpoch, {
-          dialogId: dialog.dialogId,
-          limit: REQUEST_LIMIT
-        })
+        this.readDialogRequests(dialog)
       ]);
       if (generation !== this.selectionGeneration || this.selectedDialogId() !== this.dialogKey(dialog)) return;
       const previousMessages = this.messages();
@@ -446,10 +464,11 @@ export class DialogsComponent implements OnChanges, OnDestroy {
       this.attemptLoading.set(false);
     }
     try {
-      const page = await this.get<HarnessPage<HarnessAttempt>>(this.dialogRoute(dialog, 'attempts'), dialog.configEpoch, {
-        requestId: request.requestId,
-        limit: ATTEMPT_LIMIT
-      });
+      const input = this.requests().find(item => item.requestId === request.requestId)?.inputMessageId;
+      const related = input ? this.requests().filter(item => item.inputMessageId === input) : [request];
+      const pages = related.length > 1 ? await Promise.all(related.map(item => this.readRequestAttempts(dialog, item.requestId)))
+        : [await this.get<HarnessPage<HarnessAttempt>>(this.dialogRoute(dialog, 'attempts'), dialog.configEpoch, { requestId: request.requestId, limit: ATTEMPT_LIMIT })];
+      const page = { items: pages.flatMap(item => item.items), nextCursor: related.length > 1 ? null : pages[0].nextCursor };
       if (generation !== this.requestGeneration || this.selectedRequestId() !== request.requestId) return;
       const byId = new Map((preserveAttempt ? this.attempts() : []).map(item => [item.attemptId, item]));
       const firstPageLeavesGap = page.items.length > 0 && page.items.every(item => !byId.has(item.attemptId));
@@ -494,9 +513,14 @@ export class DialogsComponent implements OnChanges, OnDestroy {
     }
   }
 
+  isMessageSelected(message: HarnessMessage): boolean {
+    return message.role === 'user' && (this.selectedRequestId() === message.requestId ||
+      this.requests().some(request => request.requestId === this.selectedRequestId() && request.inputMessageId === message.messageId));
+  }
+
   selectMessageRequest(message: HarnessMessage): void {
     if (message.role !== 'user') return;
-    if (this.selectedRequestId() === message.requestId) {
+    if (this.isMessageSelected(message)) {
       this.requestGeneration++;
       this.selectedRequestId.set(null);
       this.selectedAttemptId.set(null);
@@ -687,7 +711,7 @@ export class DialogsComponent implements OnChanges, OnDestroy {
   async sendMessage(): Promise<void> {
     const dialog = this.selectedDialog();
     const text = this.draft.trim();
-    if (!dialog || !text || this.sending()) return;
+    if (!dialog || !text || this.sending() || this.retrying()) return;
     const node = this.nodes.find(item => item.connectionId === dialog.connectionId);
     const identity = this.identities()[dialog.connectionId];
     if (!node || !identity || !this.canWriteToNode(node)) {
@@ -768,8 +792,170 @@ export class DialogsComponent implements OnChanges, OnDestroy {
     void this.sendMessage();
   }
 
+  latestRequest(message: HarnessMessage): HarnessRequest | undefined {
+    return this.requests().filter(request => request.inputMessageId === message.messageId)
+      .sort((a, b) => b.queueSequence - a.queueSequence)[0];
+  }
+
+  latestAttempt(message: HarnessMessage): HarnessAttempt | undefined {
+    const request = this.latestRequest(message);
+    return request && [...(this.messageAttempts()[request.requestId] ?? [])].sort((a, b) => b.generation - a.generation)[0];
+  }
+
+  messageStatus(message: HarnessMessage): string {
+    return this.latestRequest(message)?.status ?? (message.role === 'user' ? message.disposition : 'completed');
+  }
+
+  messageFailure(message: HarnessMessage): string {
+    const attempt = this.latestAttempt(message);
+    if (!attempt) return '';
+    if (attempt.effectStatus !== 'none') return 'Возможны побочные эффекты. Перед повтором требуется сверка состояния.';
+    return this.attemptFailures()[attempt.attemptId]?.safeMessage ?? (attempt.state === 'failed' ? 'Попытка завершилась ошибкой.' : '');
+  }
+
+  retryTail(): HarnessMessage[] {
+    const dialog = this.selectedDialog();
+    if (!dialog || this.requestNextCursor() || this.historyLoading() || this.historyError() || !this.canWriteSelected() ||
+      this.pendingCommands().some(item => item.connectionId === dialog.connectionId && item.dialogId === dialog.dialogId)) return [];
+    const originals = this.messages().filter(message => message.role === 'user' && !!this.latestRequest(message));
+    const tail: HarnessMessage[] = [];
+    let nativeAttempts: HarnessAttempt[] = [];
+    for (const message of [...originals].reverse()) {
+      const related = this.requests().filter(request => request.inputMessageId === message.messageId);
+      if (related.some(request => !this.activityRequestsLoaded.has(request.requestId))) break;
+      const known = related.flatMap(request => this.messageAttempts()[request.requestId] ?? []).filter(attempt => !!attempt.startedAt);
+      const suffix = [...known, ...nativeAttempts];
+      const attempt = this.latestAttempt(message);
+      if (!attempt || !['failed', 'interrupted'].includes(this.messageStatus(message)) ||
+        !['failed', 'interrupted'].includes(attempt.state) || attempt.effectStatus !== 'none') break;
+      // Only Codex has the scoped ledger/native proof for a backward replay.
+      if (tail.length && (this.identities()[dialog.connectionId]?.adapter.kind !== 'codex' ||
+        suffix.length > 100 || suffix.some(item => item.state !== 'failed' || item.effectStatus !== 'none' ||
+          !this.completeDiagnostics.has(item.attemptId) || this.attemptFailures()[item.attemptId]?.errorCode !== 'codex_model_unsupported'))) break;
+      tail.unshift(message);
+      nativeAttempts = suffix;
+    }
+    return tail;
+  }
+
+  retryBoundExplanation(): string {
+    const failed = this.messages().filter(message => message.role === 'user' && ['failed', 'interrupted'].includes(this.messageStatus(message)));
+    return failed.length > this.retryTail().length
+      ? 'Серия ограничена подтверждённым контекстом: требуется полная диагностика всех поколений; поддерживается не более 100 предыдущих попыток.' : '';
+  }
+
+  canRetryMessage(message: HarnessMessage): boolean {
+    const tail = this.retryTail();
+    return !!tail.length && tail[tail.length - 1].messageId === message.messageId;
+  }
+
+  async retryMessages(series: boolean): Promise<void> {
+    if (this.retrying() || this.sending()) return;
+    const dialog = this.selectedDialog();
+    const identity = dialog && this.identities()[dialog.connectionId];
+    const tail = this.retryTail();
+    if (!dialog || !identity || !tail.length) return;
+    const targets = (series ? tail : tail.slice(-1)).map(message => this.latestAttempt(message)!);
+    const generation = this.selectionGeneration;
+    const session = this.sessionKey;
+    const sessionGeneration = this.sessionGeneration;
+    const currentSession = () => session === this.sessionKey && sessionGeneration === this.sessionGeneration;
+    this.retrying.set(true);
+    this.actionError.set(''); this.actionNotice.set('');
+    let accepted = 0;
+    try {
+      for (const attempt of targets) {
+        if (generation !== this.selectionGeneration || !currentSession() || this.selectedDialogId() !== this.dialogKey(dialog)) break;
+        const commandId = crypto.randomUUID();
+        const body = { protocolVersion: 1, schemaId: 'harness-wire-v2', commandId, kind: 'attempt.retry',
+          target: { nodeId: dialog.nodeId, attemptId: attempt.attemptId },
+          expected: { attemptGeneration: attempt.generation }, payload: { acknowledgeKnownEffects: false } };
+        const pending = await this.retainPending(body, { commandId, kind: 'attempt.retry', connectionId: dialog.connectionId,
+          nodeId: dialog.nodeId, configEpoch: dialog.configEpoch, registryVersion: identity.registryVersion,
+          identityEpoch: identity.identityEpoch, adapterKind: identity.adapter.kind, adapterVersion: identity.adapter.version,
+          dialogId: dialog.dialogId, priorAttemptId: attempt.attemptId });
+        if (generation !== this.selectionGeneration || !currentSession()) { if (currentSession()) this.removePending(commandId); break; }
+        try {
+          const receipt = await this.post<CommandReceipt>(this.dialogRoute(dialog, 'commands'), dialog.configEpoch, body, identity);
+          // The old session retains its pending ID for later readback.
+          if (!currentSession()) break;
+          // Reconcile the receipt, but never continue a stale dialog series.
+          if (!this.completeCommand(pending, receipt)) break;
+          accepted++;
+          this.retryProgress.set(`Принято в очередь ${accepted} из ${targets.length}. Выполнение подтверждается отдельно.`);
+          if (generation !== this.selectionGeneration || session !== this.sessionKey) break;
+        } catch (error) {
+          if (!currentSession()) break;
+          await this.handleCommandFailure(pending, error);
+          break;
+        }
+      }
+    } catch {
+      if (currentSession()) this.actionError.set('Не удалось сохранить команду. Серия остановлена; проверьте квитанции.');
+    } finally {
+      if (!currentSession()) return;
+      this.retrying.set(false);
+      this.retryProgress.set(`Принято в очередь ${accepted} из ${targets.length}.`);
+      if (accepted < targets.length) this.actionNotice.set('Серия остановлена. Обновите состояние перед продолжением.');
+      if (session === this.sessionKey && this.selectedDialogId() === this.dialogKey(dialog)) await this.refreshSelectedDialog(true);
+    }
+  }
+
+  private async readDialogRequests(dialog: DialogListRow): Promise<HarnessPage<HarnessRequest>> {
+    let cursor: string | null = null;
+    const items: HarnessRequest[] = [];
+    for (let count = 0; count < 20; count++) {
+      const page: HarnessPage<HarnessRequest> = await this.get<HarnessPage<HarnessRequest>>(this.dialogRoute(dialog, 'requests'), dialog.configEpoch,
+        { dialogId: dialog.dialogId, limit: 100, cursor });
+      items.push(...page.items); cursor = page.nextCursor;
+      if (!cursor || count === 19) return { ...page, items };
+    }
+    throw new Error('Request limit reached');
+  }
+
+  private async readRequestAttempts(dialog: DialogListRow, requestId: string): Promise<HarnessPage<HarnessAttempt>> {
+    let cursor: string | null = null;
+    const items: HarnessAttempt[] = [];
+    for (let count = 0; count < 20; count++) {
+      const page: HarnessPage<HarnessAttempt> = await this.get<HarnessPage<HarnessAttempt>>(this.dialogRoute(dialog, 'attempts'), dialog.configEpoch,
+        { requestId, limit: 100, cursor });
+      items.push(...page.items); cursor = page.nextCursor;
+      if (!cursor) return { ...page, items };
+    }
+    throw new Error('Слишком много попыток для одной страницы выполнения.');
+  }
+
+  private async readAttemptFailure(dialog: DialogListRow, attempt: HarnessAttempt, generation: number): Promise<void> {
+    const current = () => generation === this.activityGeneration && this.selectedDialogId() === this.dialogKey(dialog);
+    this.completeDiagnostics.delete(attempt.attemptId);
+    try {
+      let after = 0;
+      let latest: AttemptFailure | undefined;
+      for (let count = 0; count < 5; count++) {
+        const page = await this.get<HarnessPage<AttemptFailure>>(this.dialogRoute(dialog, `attempts/${encodeURIComponent(attempt.attemptId)}/events`),
+          dialog.configEpoch, { limit: 100, after });
+        if (generation !== this.activityGeneration || this.selectedDialogId() !== this.dialogKey(dialog)) return;
+        latest = page.items.filter(item => item.generation === attempt.generation && item.attemptId === attempt.attemptId).sort((a, b) => b.seq - a.seq)[0] ?? latest;
+        if (!page.nextCursor) {
+          this.completeDiagnostics.add(attempt.attemptId);
+          if (latest) this.attemptFailures.update(all => ({ ...all, [attempt.attemptId]: latest! }));
+          return;
+        }
+        const next = Number(page.nextCursor);
+        if (!Number.isSafeInteger(next) || next <= after) break;
+        after = next;
+      }
+    } catch { /* History stays visible when diagnostic enrichment fails. */ }
+    if (current()) this.attemptFailures.update(all => ({ ...all, [attempt.attemptId]: {
+      seq: 0, attemptId: attempt.attemptId, generation: attempt.generation, type: 'attempt.failed',
+      effectStatus: attempt.effectStatus, errorCode: 'diagnostics_incomplete',
+      safeMessage: 'Диагностика неполная или недоступна. Причина и безопасность повтора серии не подтверждены.'
+    } }));
+  }
+
   async reconcilePending(pending: PendingCommand): Promise<void> {
     if (this.reconcilingCommandId()) return;
+    const session = this.sessionGeneration;
     this.reconcilingCommandId.set(pending.commandId);
     this.actionError.set('');
     try {
@@ -785,6 +971,7 @@ export class DialogsComponent implements OnChanges, OnDestroy {
         this.route(context, `commands/${encodeURIComponent(pending.commandId)}`),
         readConfigEpoch
       );
+      if (session !== this.sessionGeneration) return;
       if (status.canonicalPayloadHash !== pending.canonicalPayloadHash) {
         this.actionError.set('Квитанция найдена, но хеш команды не совпадает. Команда оставлена без автоматического повтора.');
         return;
@@ -792,10 +979,12 @@ export class DialogsComponent implements OnChanges, OnDestroy {
       if (!this.completeCommand(pending, status.receipt)) return;
       this.actionNotice.set('Квитанция найдена: команда была принята.');
       await this.loadDialogs(false);
-      const dialogId = status.receipt.references.dialogId;
+      if (session !== this.sessionGeneration) return;
+      const dialogId = status.receipt.references.dialogId ?? pending.dialogId;
       const dialog = this.dialogs().find(item => item.nodeId === pending.nodeId && item.dialogId === dialogId);
       if (dialog) await this.selectDialog(dialog);
     } catch (error) {
+      if (session !== this.sessionGeneration) return;
       const failure = this.failure(error);
       if (failure.status === 404) {
         this.actionError.set('Квитанция пока не найдена. Исход остаётся неизвестным; команда не будет отправлена повторно автоматически.');
@@ -803,7 +992,7 @@ export class DialogsComponent implements OnChanges, OnDestroy {
         this.actionError.set(`Не удалось проверить квитанцию: ${failure.message}`);
       }
     } finally {
-      this.reconcilingCommandId.set(null);
+      if (session === this.sessionGeneration) this.reconcilingCommandId.set(null);
     }
   }
 
@@ -1127,7 +1316,7 @@ export class DialogsComponent implements OnChanges, OnDestroy {
 
   private completeCommand(pending: PendingCommand, receipt: CommandReceipt): boolean {
     const kindMatches = receipt.commandKind === pending.kind;
-    const dialogMatches = !!receipt.references.dialogId
+    const dialogMatches = pending.kind === 'attempt.retry' ? receipt.references.priorAttemptId === pending.priorAttemptId && !!receipt.references.requestId : !!receipt.references.dialogId
       && (pending.kind === 'dialog.create' || receipt.references.dialogId === pending.dialogId);
     const enqueueReferencesComplete = pending.kind !== 'message.enqueue'
       || (!!receipt.references.messageId && !!receipt.references.requestId);
@@ -1140,6 +1329,8 @@ export class DialogsComponent implements OnChanges, OnDestroy {
   }
 
   private async retainPending(body: unknown, base: Omit<PendingCommand, 'v' | 'canonicalPayloadHash' | 'intentHash' | 'createdAt'>): Promise<PendingCommand> {
+    const session = this.sessionGeneration;
+    const sessionKey = this.sessionKey;
     const pending: PendingCommand = {
       v: 1,
       ...base,
@@ -1147,6 +1338,7 @@ export class DialogsComponent implements OnChanges, OnDestroy {
       intentHash: await this.intentHash(body),
       createdAt: new Date().toISOString()
     };
+    if (session !== this.sessionGeneration || sessionKey !== this.sessionKey) throw new Error('Web session changed.');
     const next = [...this.pendingCommands().filter(item => item.commandId !== pending.commandId), pending];
     this.persistPendingCommands(next);
     this.pendingCommands.set(next);
@@ -1269,6 +1461,8 @@ export class DialogsComponent implements OnChanges, OnDestroy {
     this.activityInFlight.clear();
     this.activityLoaded.clear();
     this.activityRequestsLoaded.clear();
+    this.activityRequestStates.clear();
+    this.completeDiagnostics.clear();
     this.activityQueue.length = 0;
   }
 
@@ -1285,8 +1479,9 @@ export class DialogsComponent implements OnChanges, OnDestroy {
       .map(request => request.requestId));
     for (const requestId of new Set(messages
       .filter((message): message is Extract<HarnessMessage, { role: 'user' }> => message.role === 'user')
-      .map(message => message.requestId))) {
-      this.enqueueActivityRequest(requestId, refresh && activeRequestIds.has(requestId));
+      .flatMap(message => this.requests().filter(request => request.inputMessageId === message.messageId).map(request => request.requestId).concat(message.requestId)))) {
+      const state = this.requests().find(request => request.requestId === requestId)?.status ?? '';
+      this.enqueueActivityRequest(requestId, refresh && (activeRequestIds.has(requestId) || this.activityRequestStates.get(requestId) !== state));
     }
     for (const attemptId of attemptIds) {
       if (this.activityLoaded.has(attemptId) && (!refresh || !runningIds.has(attemptId))) continue;
@@ -1306,6 +1501,7 @@ export class DialogsComponent implements OnChanges, OnDestroy {
     if (!requestId || (this.activityRequestsLoaded.has(requestId) && !refresh)) return;
     const key = `${this.activityGeneration}\u0000request\u0000${requestId}`;
     if (this.activityQueued.has(key) || this.activityInFlight.has(key)) return;
+    if (refresh) this.activityRequestsLoaded.delete(requestId);
     this.activityQueued.add(key);
     this.activityQueue.push(key);
   }
@@ -1329,6 +1525,7 @@ export class DialogsComponent implements OnChanges, OnDestroy {
     const dialog = this.selectedDialog();
     if (!dialog) return;
     const generation = this.activityGeneration;
+    const requestState = this.requests().find(request => request.requestId === requestId)?.status ?? '';
     try {
       let cursor: string | null = null;
       let pageCount = 0;
@@ -1338,6 +1535,11 @@ export class DialogsComponent implements OnChanges, OnDestroy {
           { requestId, limit: ATTEMPT_LIMIT, cursor }
         );
         if (generation !== this.activityGeneration || this.selectedDialogId() !== this.dialogKey(dialog)) return;
+        this.messageAttempts.update(all => ({ ...all, [requestId]: [...(cursor ? all[requestId] ?? [] : []), ...page.items] }));
+        for (const attempt of page.items) {
+          if (['failed', 'interrupted', 'unknown'].includes(attempt.state)) await this.readAttemptFailure(dialog, attempt, generation);
+          if (generation !== this.activityGeneration || this.selectedDialogId() !== this.dialogKey(dialog)) return;
+        }
         page.items.forEach((attempt: HarnessAttempt) => {
           const running = ['dispatching', 'running', 'waiting_input', 'stopping'].includes(attempt.state);
           if (!this.activityLoaded.has(attempt.attemptId) || running) this.enqueueActivity(attempt.attemptId);
@@ -1345,7 +1547,9 @@ export class DialogsComponent implements OnChanges, OnDestroy {
         cursor = page.nextCursor;
         pageCount++;
       } while (cursor && pageCount < 5);
-      this.activityRequestsLoaded.add(requestId);
+      if (!cursor) this.activityRequestsLoaded.add(requestId);
+      this.activityRequestStates.set(requestId, requestState);
+      this.messageAttempts.update(all => ({ ...all }));
       if (cursor) this.contextError.set('Показаны первые 100 попыток обращения. Остальные можно загрузить через «Выполнение» под его сообщением.');
     } catch (error) {
       if (generation !== this.activityGeneration || this.selectedDialogId() !== this.dialogKey(dialog)) return;
@@ -1530,14 +1734,14 @@ export class DialogsComponent implements OnChanges, OnDestroy {
       }
       if (!request || this.navigationTarget?.nonce !== target.nonce) return;
       await this.selectRequest(request);
-      while (!this.messages().some(item => item.role === 'user' && item.requestId === request!.requestId)
+      while (!this.messages().some(item => item.role === 'user' && item.messageId === request!.inputMessageId)
         && this.historyNextCursor() && this.navigationTarget?.nonce === target.nonce) {
         const before = this.historyNextCursor();
         await this.loadOlderMessages();
         if (before === this.historyNextCursor()) break;
       }
       if (this.navigationTarget?.nonce !== target.nonce) return;
-      if (!this.messages().some(item => item.role === 'user' && item.requestId === request!.requestId)) return;
+      if (!this.messages().some(item => item.role === 'user' && item.messageId === request!.inputMessageId)) return;
       window.requestAnimationFrame(() => {
         if (this.selectedDialogId() !== this.dialogKey(dialog!) || this.navigationTarget?.nonce !== target.nonce) return;
         this.disarmHistoryAutoScroll();
