@@ -91,7 +91,6 @@ export class DialogsComponent implements OnChanges, OnDestroy {
   readonly messages = signal<HarnessMessage[]>([]);
   readonly requests = signal<HarnessRequest[]>([]);
   readonly attempts = signal<HarnessAttempt[]>([]);
-  readonly toolCalls = signal<ToolCallSummary[]>([]);
   readonly toolDetail = signal<ToolCallDetail | null>(null);
   readonly selectedRequestId = signal<string | null>(null);
   readonly selectedAttemptId = signal<string | null>(null);
@@ -99,6 +98,8 @@ export class DialogsComponent implements OnChanges, OnDestroy {
   readonly listLoading = signal(false);
   readonly historyLoading = signal(false);
   readonly contextLoading = signal(false);
+  readonly attemptLoading = signal(false);
+  readonly executionError = signal('');
   readonly requestMoreLoading = signal(false);
   readonly toolLoading = signal(false);
   readonly sending = signal(false);
@@ -112,7 +113,6 @@ export class DialogsComponent implements OnChanges, OnDestroy {
   readonly historyNextCursor = signal<string | null>(null);
   readonly requestNextCursor = signal<string | null>(null);
   readonly attemptNextCursor = signal<string | null>(null);
-  readonly toolNextCursor = signal<string | null>(null);
   readonly historyLoadingOlder = signal(false);
   readonly listMoreLoading = signal(false);
   readonly pendingCommands = signal<PendingCommand[]>([]);
@@ -137,6 +137,7 @@ export class DialogsComponent implements OnChanges, OnDestroy {
   private listGeneration = 0;
   private selectionGeneration = 0;
   private requestGeneration = 0;
+  private attemptGeneration = 0;
   private toolGeneration = 0;
   private refreshTimer?: number;
   private historyCursorInitialized = false;
@@ -181,10 +182,6 @@ export class DialogsComponent implements OnChanges, OnDestroy {
   selectedDialog(): DialogListRow | null {
     const key = this.selectedDialogId();
     return this.dialogs().find(dialog => this.dialogKey(dialog) === key) ?? null;
-  }
-
-  selectedRequest(): HarnessRequest | null {
-    return this.requests().find(request => request.requestId === this.selectedRequestId()) ?? null;
   }
 
   selectedAttempt(): HarnessAttempt | null {
@@ -308,10 +305,14 @@ export class DialogsComponent implements OnChanges, OnDestroy {
     const key = this.dialogKey(dialog);
     if (this.selectedDialogId() === key) return;
     this.selectedDialogId.set(key);
+    this.requestGeneration++;
+    this.toolGeneration++;
+    this.contextLoading.set(false);
+    this.attemptLoading.set(false);
+    this.executionError.set('');
     this.messages.set([]);
     this.requests.set([]);
     this.attempts.set([]);
-    this.toolCalls.set([]);
     this.toolDetail.set(null);
     this.selectedRequestId.set(null);
     this.selectedAttemptId.set(null);
@@ -319,7 +320,6 @@ export class DialogsComponent implements OnChanges, OnDestroy {
     this.historyNextCursor.set(null);
     this.requestNextCursor.set(null);
     this.attemptNextCursor.set(null);
-    this.toolNextCursor.set(null);
     this.resetActivityCache();
     this.historyCursorInitialized = false;
     this.historyError.set('');
@@ -365,13 +365,8 @@ export class DialogsComponent implements OnChanges, OnDestroy {
       this.freshnessAt.set(new Date().toISOString());
       this.historyLoading.set(false);
 
-      if (!this.selectedRequestId() && requestPage.items.length) {
-        const preferred = [...requestPage.items].sort((a, b) => b.queueSequence - a.queueSequence)[0];
-        void this.selectRequest(preferred);
-      } else if (this.selectedRequestId()) {
-        const selected = requestPage.items.find(item => item.requestId === this.selectedRequestId());
-        if (selected) void this.selectRequest(selected, true);
-      }
+      const openedRequestId = this.selectedRequestId();
+      if (openedRequestId) void this.selectRequest({ requestId: openedRequestId }, true);
 
       if (renderedHistoryChanged) this.scheduleHistoryScrollToEnd();
     } catch (error) {
@@ -436,18 +431,19 @@ export class DialogsComponent implements OnChanges, OnDestroy {
     }
   }
 
-  async selectRequest(request: HarnessRequest, preserveAttempt = false, preferredAttemptId?: string): Promise<void> {
+  async selectRequest(request: Pick<HarnessRequest, 'requestId'>, preserveAttempt = false): Promise<void> {
     const dialog = this.selectedDialog();
     if (!dialog) return;
     const generation = ++this.requestGeneration;
     this.selectedRequestId.set(request.requestId);
     this.contextLoading.set(true);
-    this.contextError.set('');
+    this.executionError.set('');
     if (!preserveAttempt) {
+      this.disarmHistoryAutoScroll();
+      this.attempts.set([]);
+      this.attemptNextCursor.set(null);
       this.selectedAttemptId.set(null);
-      this.selectedToolCallId.set(null);
-      this.toolCalls.set([]);
-      this.toolDetail.set(null);
+      this.attemptLoading.set(false);
     }
     try {
       const page = await this.get<HarnessPage<HarnessAttempt>>(this.dialogRoute(dialog, 'attempts'), dialog.configEpoch, {
@@ -455,44 +451,44 @@ export class DialogsComponent implements OnChanges, OnDestroy {
         limit: ATTEMPT_LIMIT
       });
       if (generation !== this.requestGeneration || this.selectedRequestId() !== request.requestId) return;
-      this.attempts.set(page.items);
-      this.attemptNextCursor.set(page.nextCursor);
+      const byId = new Map((preserveAttempt ? this.attempts() : []).map(item => [item.attemptId, item]));
+      const firstPageLeavesGap = page.items.length > 0 && page.items.every(item => !byId.has(item.attemptId));
+      page.items.forEach(item => byId.set(item.attemptId, item));
+      this.attempts.set([...byId.values()].sort((a, b) => a.generation - b.generation));
+      // A new first page can expose a gap even after pagination was exhausted.
+      if (!preserveAttempt || firstPageLeavesGap) this.attemptNextCursor.set(page.nextCursor);
       this.contextLoading.set(false);
-      const current = page.items.find(item => item.attemptId === (preferredAttemptId ?? this.selectedAttemptId()));
+      const current = this.attempts().find(item => item.attemptId === this.selectedAttemptId());
       const preferred = current ?? [...page.items].sort((a, b) => b.generation - a.generation)[0];
-      if (preferred) await this.selectAttempt(preferred, preserveAttempt);
+      if (preferred) await this.selectAttempt(preferred);
     } catch (error) {
       if (generation !== this.requestGeneration) return;
       this.contextLoading.set(false);
-      this.contextError.set(this.failure(error).message);
+      this.executionError.set(this.failure(error).message);
     }
-  }
-
-  selectRequestById(requestId: string): void {
-    const request = this.requests().find(item => item.requestId === requestId);
-    if (request) void this.selectRequest(request);
   }
 
   async loadMoreAttempts(): Promise<void> {
     const dialog = this.selectedDialog();
-    const request = this.selectedRequest();
+    const requestId = this.selectedRequestId();
     const cursor = this.attemptNextCursor();
-    if (!dialog || !request || !cursor || this.contextLoading()) return;
+    if (!dialog || !requestId || !cursor || this.contextLoading()) return;
     const generation = this.requestGeneration;
     this.contextLoading.set(true);
+    this.executionError.set('');
     try {
       const page = await this.get<HarnessPage<HarnessAttempt>>(this.dialogRoute(dialog, 'attempts'), dialog.configEpoch, {
-        requestId: request.requestId,
+        requestId,
         limit: ATTEMPT_LIMIT,
         cursor
       });
-      if (generation !== this.requestGeneration || this.selectedRequestId() !== request.requestId) return;
+      if (generation !== this.requestGeneration || this.selectedRequestId() !== requestId) return;
       const byId = new Map(this.attempts().map(item => [item.attemptId, item]));
       page.items.forEach(item => byId.set(item.attemptId, item));
       this.attempts.set([...byId.values()].sort((a, b) => a.generation - b.generation));
       this.attemptNextCursor.set(page.nextCursor);
     } catch (error) {
-      if (generation === this.requestGeneration) this.contextError.set(this.failure(error).message);
+      if (generation === this.requestGeneration) this.executionError.set(this.failure(error).message);
     } finally {
       if (generation === this.requestGeneration) this.contextLoading.set(false);
     }
@@ -500,37 +496,38 @@ export class DialogsComponent implements OnChanges, OnDestroy {
 
   selectMessageRequest(message: HarnessMessage): void {
     if (message.role !== 'user') return;
-    const request = this.requests().find(item => item.requestId === message.requestId);
-    if (request) void this.selectRequest(request);
+    if (this.selectedRequestId() === message.requestId) {
+      this.requestGeneration++;
+      this.selectedRequestId.set(null);
+      this.selectedAttemptId.set(null);
+      this.contextLoading.set(false);
+      this.attemptLoading.set(false);
+      return;
+    }
+    void this.selectRequest(message);
   }
 
-  async selectAttempt(attempt: HarnessAttempt, preserveTool = false): Promise<void> {
+  async selectAttempt(attempt: HarnessAttempt): Promise<void> {
     const dialog = this.selectedDialog();
     if (!dialog) return;
-    const generation = ++this.toolGeneration;
+    const generation = this.requestGeneration;
+    const attemptGeneration = ++this.attemptGeneration;
     this.selectedAttemptId.set(attempt.attemptId);
-    this.toolLoading.set(true);
-    this.contextError.set('');
-    if (!preserveTool) {
-      this.selectedToolCallId.set(null);
-      this.toolDetail.set(null);
-    }
+    this.attemptLoading.set(true);
+    this.executionError.set('');
     try {
       const page = await this.get<ToolCallPage>(
         this.dialogRoute(dialog, `attempts/${encodeURIComponent(attempt.attemptId)}/tool-calls`),
         dialog.configEpoch,
         { limit: TOOL_LIMIT }
       );
-      if (generation !== this.toolGeneration || this.selectedAttemptId() !== attempt.attemptId) return;
-      this.toolCalls.set(page.items);
-      this.toolNextCursor.set(page.nextCursor);
-      this.toolLoading.set(false);
-      const current = page.items.find(item => item.toolCallId === this.selectedToolCallId());
-      if (current) void this.selectToolCall(current);
+      if (generation !== this.requestGeneration || attemptGeneration !== this.attemptGeneration || this.selectedAttemptId() !== attempt.attemptId) return;
+      this.mergeActivityPage(attempt, page);
+      this.attemptLoading.set(false);
     } catch (error) {
-      if (generation !== this.toolGeneration) return;
-      this.toolLoading.set(false);
-      this.contextError.set(this.failure(error).message);
+      if (generation !== this.requestGeneration || attemptGeneration !== this.attemptGeneration || this.selectedAttemptId() !== attempt.attemptId) return;
+      this.attemptLoading.set(false);
+      this.executionError.set(this.failure(error).message);
     }
   }
 
@@ -539,32 +536,21 @@ export class DialogsComponent implements OnChanges, OnDestroy {
     if (attempt) void this.selectAttempt(attempt);
   }
 
-  async loadMoreToolCalls(): Promise<void> {
-    const dialog = this.selectedDialog();
-    const attempt = this.selectedAttempt();
-    const cursor = this.toolNextCursor();
-    if (!dialog || !attempt || !cursor || this.toolLoading()) return;
-    const generation = this.toolGeneration;
-    this.toolLoading.set(true);
-    try {
-      const page = await this.get<ToolCallPage>(
-        this.dialogRoute(dialog, `attempts/${encodeURIComponent(attempt.attemptId)}/tool-calls`),
-        dialog.configEpoch,
-        { limit: TOOL_LIMIT, cursor }
-      );
-      if (generation !== this.toolGeneration || this.selectedAttemptId() !== attempt.attemptId) return;
-      const byId = new Map(this.toolCalls().map(item => [item.toolCallId, item]));
-      page.items.forEach(item => byId.set(item.toolCallId, item));
-      this.toolCalls.set([...byId.values()].sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt)));
-      this.toolNextCursor.set(page.nextCursor);
-    } catch (error) {
-      if (generation === this.toolGeneration) this.contextError.set(this.failure(error).message);
-    } finally {
-      if (generation === this.toolGeneration) this.toolLoading.set(false);
-    }
+  hasAttemptActivity(attemptId: string): boolean {
+    return this.activityGroups().some(group => group.attemptId === attemptId);
   }
 
-  async selectToolCall(tool: ToolCallSummary, explicitAttemptId?: string): Promise<void> {
+  showAttemptActivity(attemptId: string): void {
+    this.disarmHistoryAutoScroll();
+    const details = this.historyViewport?.nativeElement.querySelector<HTMLDetailsElement>(
+      `[data-attempt-id="${CSS.escape(attemptId)}"]`);
+    if (!details) return;
+    details.open = true;
+    details.querySelector<HTMLElement>('summary')?.focus({ preventScroll: true });
+    details.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+  }
+
+  async selectToolCall(tool: ToolCallSummary, explicitAttemptId?: string, preserveOutputs = false): Promise<void> {
     const dialog = this.selectedDialog();
     const attemptId = explicitAttemptId ?? this.selectedAttempt()?.attemptId;
     if (!dialog || !attemptId) return;
@@ -579,7 +565,17 @@ export class DialogsComponent implements OnChanges, OnDestroy {
         { limit: TOOL_LIMIT }
       );
       if (generation !== this.toolGeneration || this.selectedToolCallId() !== tool.toolCallId) return;
-      this.toolDetail.set(this.toolDetailFromRead(read));
+      const next = this.toolDetailFromRead(read);
+      const previous = this.toolDetail();
+      if (preserveOutputs && previous?.toolCallId === next.toolCallId) {
+        const outputs = new Map(previous.outputs.map(item => [item.index, item]));
+        next.outputs.forEach(item => outputs.set(item.index, item));
+        next.outputs = [...outputs.values()].sort((a, b) => a.index - b.index);
+        const previousLast = previous.outputs.at(-1)?.index ?? -1;
+        const nextLast = read.toolCall.outputs.at(-1)?.index ?? -1;
+        if (previousLast > nextLast) next.nextOutputCursor = previous.nextOutputCursor ?? next.nextOutputCursor;
+      }
+      this.toolDetail.set(next);
       this.toolLoading.set(false);
     } catch (error) {
       if (generation !== this.toolGeneration) return;
@@ -894,17 +890,6 @@ export class DialogsComponent implements OnChanges, OnDestroy {
   }
 
   async inspectInlineTool(selection: ToolActivitySelection): Promise<void> {
-    const request = this.requests().find(item => item.requestId === selection.requestId);
-    if (request && this.selectedRequestId() !== selection.requestId) await this.selectRequest(request, false, selection.attemptId);
-    const attempt = this.attempts().find(item => item.attemptId === selection.attemptId)
-      ?? this.activityPages().find(item => item.attempt.attemptId === selection.attemptId)?.attempt;
-    if (!attempt) return;
-    this.selectedRequestId.set(selection.requestId);
-    this.selectedAttemptId.set(selection.attemptId);
-    const summaries = this.activityPages()
-      .filter(page => page.attempt.attemptId === selection.attemptId)
-      .flatMap(page => page.items);
-    this.toolCalls.set(dedupeToolCalls(summaries));
     await this.selectToolCall(selection.toolCall, selection.attemptId);
   }
 
@@ -1361,7 +1346,7 @@ export class DialogsComponent implements OnChanges, OnDestroy {
         pageCount++;
       } while (cursor && pageCount < 5);
       this.activityRequestsLoaded.add(requestId);
-      if (cursor) this.contextError.set('Для одного обращения показаны первые 100 попыток. Остальные доступны через постраничный контекст выполнения.');
+      if (cursor) this.contextError.set('Показаны первые 100 попыток обращения. Остальные можно загрузить через «Выполнение» под его сообщением.');
     } catch (error) {
       if (generation !== this.activityGeneration || this.selectedDialogId() !== this.dialogKey(dialog)) return;
       this.contextError.set(this.failure(error).message);
@@ -1392,7 +1377,7 @@ export class DialogsComponent implements OnChanges, OnDestroy {
       };
       const previous = this.activityPages().find(item => item.attempt.attemptId === attemptId);
       const renderedActivityChanged = !previous || this.activityRenderKey(previous) !== this.activityRenderKey(next);
-      this.activityPages.update(pages => [...pages.filter(item => item.attempt.attemptId !== attemptId), next]);
+      this.mergeActivityPage(attemptRead.attempt, page);
       this.activityErrors.update(errors => {
         const { [attemptId]: _removed, ...rest } = errors;
         return rest;
@@ -1412,6 +1397,25 @@ export class DialogsComponent implements OnChanges, OnDestroy {
     return this.requests().find(item => item.requestId === requestId)?.inputMessageId
       ?? this.messages().find(message => message.role === 'user' && message.requestId === requestId)?.messageId
       ?? '';
+  }
+
+  private mergeActivityPage(attempt: HarnessAttempt, page: ToolCallPage): void {
+    const previous = this.activityPages().filter(item => item.attempt.attemptId === attempt.attemptId);
+    const latest = previous.at(-1);
+    const previousItems = dedupeToolCalls(previous.flatMap(item => item.items));
+    const next: ToolActivityPage = {
+      requestId: attempt.requestId, inputMessageId: this.inputMessageId(attempt.requestId),
+      attempt: latest && latest.attempt.version > attempt.version ? latest.attempt : attempt,
+      items: dedupeToolCalls([...previousItems, ...page.items]),
+      nextCursor: previousItems.length > page.items.length ? latest!.nextCursor : page.nextCursor,
+      loading: previous.some(item => item.loading)
+    };
+    this.activityPages.update(pages => [...pages.filter(item => item.attempt.attemptId !== attempt.attemptId), next]);
+    const detail = this.toolDetail();
+    const current = next.items.find(item => item.toolCallId === this.selectedToolCallId());
+    if (!this.toolLoading() && detail?.attemptId === attempt.attemptId && current && current.detailVersion > detail.detailVersion) {
+      void this.selectToolCall(current, attempt.attemptId, true);
+    }
   }
 
   private canWriteToNode(node: DialogNodeProjection): boolean {
@@ -1526,6 +1530,22 @@ export class DialogsComponent implements OnChanges, OnDestroy {
       }
       if (!request || this.navigationTarget?.nonce !== target.nonce) return;
       await this.selectRequest(request);
+      while (!this.messages().some(item => item.role === 'user' && item.requestId === request!.requestId)
+        && this.historyNextCursor() && this.navigationTarget?.nonce === target.nonce) {
+        const before = this.historyNextCursor();
+        await this.loadOlderMessages();
+        if (before === this.historyNextCursor()) break;
+      }
+      if (this.navigationTarget?.nonce !== target.nonce) return;
+      if (!this.messages().some(item => item.role === 'user' && item.requestId === request!.requestId)) return;
+      window.requestAnimationFrame(() => {
+        if (this.selectedDialogId() !== this.dialogKey(dialog!) || this.navigationTarget?.nonce !== target.nonce) return;
+        this.disarmHistoryAutoScroll();
+        const message = this.historyViewport?.nativeElement.querySelector<HTMLElement>(
+          `[data-testid="message-${CSS.escape(request!.inputMessageId)}"]`);
+        message?.querySelector<HTMLElement>('.message-context')?.focus({ preventScroll: true });
+        message?.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+      });
       this.appliedNavigationNonce = target.nonce;
     } finally {
       if (this.applyingNavigationNonce === target.nonce) this.applyingNavigationNonce = 0;
