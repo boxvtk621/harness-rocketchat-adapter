@@ -80,13 +80,13 @@ try {
   await page.getByTestId('provider-secret').fill('synthetic-invalid');
   await page.getByTestId('provider-start-secret').click();
   await poll(async () => assert.ok(await page.getByTestId('provider-secret').count() === 0 || await page.getByTestId('provider-secret').inputValue() === ''));
-  await poll(async () => assert.equal(await page.getByTestId('provider-operation-state').innerText(), 'Вход не завершён'));
+  await poll(async () => assert.equal(await page.getByTestId('provider-operation-state').innerText(), 'Не завершена'));
   assert.equal(await page.getByTestId('provider-secret').inputValue(), '');
   assert.equal((await json(page, getRoute)).state, 'unauthenticated');
   evidence.checks.push('invalid secret, write-only field cleared, no false authentication');
   await page.getByTestId('provider-secret').fill('synthetic-valid');
   await page.getByTestId('provider-start-secret').click();
-  await poll(async () => assert.equal(await page.getByTestId('provider-auth-state').innerText(), 'Вход подтверждён'));
+  await poll(async () => assert.equal(await page.getByTestId('provider-auth-state').innerText(), 'Аккаунт подключён'));
   await page.screenshot({ path: output + '/auth-secret-qhd.png', fullPage: true });
   const authResponse = await api(page, 'GET', getRoute);
   assert.ok(authResponse.headers()['cache-control'].includes('no-store'));
@@ -114,7 +114,7 @@ try {
   await context.setOffline(true); await page.waitForTimeout(800); await context.setOffline(false);
   await poll(async () => assert.equal(await page.getByTestId('provider-user-code').innerText(), 'TEST-CODE'));
   await page.getByTestId('provider-cancel').click();
-  await poll(async () => assert.equal(await page.getByTestId('provider-operation-state').innerText(), 'Вход отменён'));
+  await poll(async () => assert.equal(await page.getByTestId('provider-operation-state').innerText(), 'Отменена'));
   assert.equal(await page.getByTestId('provider-user-code').count(), 0);
   await control('succeeded'); assert.equal((await json(page, getRoute)).state, 'unauthenticated', 'late completion cannot revive cancellation');
   evidence.checks.push('device code, replay, concurrency conflict, reload/reconnect, cancellation, late event');
@@ -123,11 +123,11 @@ try {
   await control('succeeded', started.operation.operationId);
   assert.equal((await json(page, getRoute)).operation.status, 'pending', 'late old completion cannot replace a newer attempt');
   await control('expired');
-  await poll(async () => assert.equal(await page.getByTestId('provider-operation-state').innerText(), 'Время ожидания истекло'));
+  await poll(async () => assert.equal(await page.getByTestId('provider-operation-state').innerText(), 'Истекло время подтверждения'));
   await page.screenshot({ path: output + '/auth-expired-qhd.png', fullPage: true });
   await page.getByTestId('provider-start-device').click(); await page.getByTestId('provider-user-code').waitFor();
   await control('succeeded');
-  await poll(async () => assert.equal(await page.getByTestId('provider-auth-state').innerText(), 'Вход подтверждён'));
+  await poll(async () => assert.equal(await page.getByTestId('provider-auth-state').innerText(), 'Аккаунт подключён'));
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: output + '/auth-mobile-390.png', fullPage: true });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
@@ -165,7 +165,7 @@ try {
   assert.equal(retryStartId, lostStartId);
   await page.unroute(authMatcher);
   await page.getByTestId('provider-cancel').click();
-  await poll(async () => assert.equal(await page.getByTestId('provider-operation-state').innerText(), 'Вход отменён'));
+  await poll(async () => assert.equal(await page.getByTestId('provider-operation-state').innerText(), 'Отменена'));
   let activeReads = 0; let maximumReads = 0; let delayedReads = 0;
   const getMatcher = '**/api/connections/*/provider-auth?*';
   await page.route(getMatcher, async intercepted => {

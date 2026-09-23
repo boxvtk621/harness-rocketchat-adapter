@@ -15,7 +15,7 @@ export interface ProviderAuthSnapshot {
 }
 
 export function providerAuthStateLabel(value: string): string {
-  return ({ unknown: 'Не подтверждена', unauthenticated: 'Вход не выполнен', authenticated: 'Вход подтверждён', reauthentication_required: 'Нужен повторный вход' } as Record<string,string>)[value] ?? 'Неизвестно';
+  return ({ unknown: 'Аккаунт не проверен', unauthenticated: 'Аккаунт не подключён', authenticated: 'Аккаунт подключён', reauthentication_required: 'Нужен повторный вход' } as Record<string,string>)[value] ?? 'Состояние неизвестно';
 }
 
 export function providerAuthStateClass(value: string): string {
@@ -36,11 +36,14 @@ export function providerAuthStateClass(value: string): string {
         <p *ngIf="loading()" role="status">Проверка состояния…</p>
         <p *ngIf="error()" class="error" role="alert">{{ error() }}</p>
         <ng-container *ngIf="snapshot() as auth">
-          <dl class="provider-auth-facts"><dt>Авторизация</dt><dd data-testid="provider-auth-state">{{ stateLabel(auth.state) }}</dd>
+          <dl class="provider-auth-facts"><dt>Аккаунт</dt><dd data-testid="provider-auth-state">{{ stateLabel(auth.state) }}</dd>
             <dt>Последняя проверка</dt><dd>{{ auth.checkedAt ? (auth.checkedAt | date:'dd.MM HH:mm:ss') : 'Не проверено' }}</dd></dl>
           <p *ngIf="auth.reasonCode" class="hint">{{ reasonLabel(auth.reasonCode) }}</p>
           <ng-container *ngIf="auth.operation as op">
-            <p data-testid="provider-operation-state" role="status">{{ operationLabel(op.status) }}</p>
+            <div class="provider-auth-operation" [attr.data-state]="op.status">
+              <span>{{ op.status === 'pending' ? 'Текущая попытка входа' : 'Последняя попытка входа' }}</span>
+              <strong data-testid="provider-operation-state" role="status">{{ operationLabel(op.status) }}</strong>
+            </div>
             <p *ngIf="op.reasonCode" class="hint">{{ reasonLabel(op.reasonCode) }}</p>
             <div *ngIf="op.status==='pending' && op.method==='device_code'" class="device-code-view">
               <ng-container *ngIf="safeUrl(op.verificationUrl) as url">
@@ -170,8 +173,8 @@ export class ProviderAuthComponent implements OnChanges, OnDestroy {
   }
   stateLabel(value: string): string { return providerAuthStateLabel(value); }
   stateClass(value: string): string { return providerAuthStateClass(value); }
-  operationLabel(value: string): string { return ({ pending: 'Ожидаем завершения входа', succeeded: 'Вход подтверждён', failed: 'Вход не завершён', cancelled: 'Вход отменён', expired: 'Время ожидания истекло' } as Record<string,string>)[value] ?? 'Состояние неизвестно'; }
-  reasonLabel(value: string): string { return ({ busy: 'Нода выполняет работу. Дождитесь её завершения.', cancelled: 'Попытка отменена. Можно начать новый вход.', verification_failed: 'Подтверждение аккаунта не получено.', provider_operation_missing: 'Провайдер больше не видит эту попытку. Повторите вход.', invalid_secret: 'Секрет не принят провайдером.', credential_rejected: 'Провайдер отклонил авторизацию.', unsupported_version: 'Установленная версия не поддерживает этот способ входа.', provider_unavailable: 'Проверка провайдера сейчас недоступна.', restarted: 'Нода перезапущена. Начните новую попытку.', interrupted_by_restart: 'Нода перезапущена. Начните новую попытку.', managed_auth_required: 'Нужен вход через аккаунт провайдера.', provider_protocol_error: 'Версия провайдера вернула неподдерживаемый ответ.', pending_operation: 'На ноде уже идёт вход.', timeout: 'Истёк таймаут попытки.', expired: 'Время ожидания истекло.', unauthenticated: 'Требуется вход у провайдера.' } as Record<string,string>)[value] ?? 'Результат требует проверки состояния.'; }
+  operationLabel(value: string): string { return ({ pending: 'Ожидает подтверждения', succeeded: 'Подтверждена', failed: 'Не завершена', cancelled: 'Отменена', expired: 'Истекло время подтверждения' } as Record<string,string>)[value] ?? 'Состояние неизвестно'; }
+  reasonLabel(value: string): string { return ({ busy: 'Нода выполняет работу. Дождитесь её завершения.', cancelled: 'Попытка отменена. Можно начать новый вход.', verification_failed: 'Подтверждение аккаунта не получено.', provider_operation_missing: 'Провайдер больше не видит эту попытку. Повторите вход.', invalid_secret: 'Секрет не принят провайдером.', credential_rejected: 'Провайдер отклонил авторизацию.', unsupported_version: 'Установленная версия не поддерживает этот способ входа.', provider_unavailable: 'Проверка провайдера сейчас недоступна.', restarted: 'Нода перезапущена. Начните новую попытку.', interrupted_by_restart: 'Нода перезапущена. Начните новую попытку.', managed_auth_required: 'Нужен вход через аккаунт провайдера.', provider_protocol_error: 'Версия провайдера вернула неподдерживаемый ответ.', pending_operation: 'На ноде уже идёт вход.', timeout: 'Истёк таймаут попытки.', expired: 'Эта попытка не была подтверждена вовремя.', unauthenticated: 'Требуется вход у провайдера.' } as Record<string,string>)[value] ?? 'Результат требует проверки состояния.'; }
   private failureLabel(failure: HttpErrorResponse): string {
     if (failure.status === 401) return 'Сессия Web истекла. Войдите снова.';
     if (failure.status === 403) return 'Недостаточно прав для управления подключениями.';

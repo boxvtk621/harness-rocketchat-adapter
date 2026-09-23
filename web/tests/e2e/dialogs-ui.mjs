@@ -363,7 +363,7 @@ try {
   assert.equal(await page.getByTestId(`message-${id(1179)}`).count(), 1, 'History deep-link loads the exact dialog from the second page without duplicating its response');
   await page.getByTestId('nav-nodes').click();
   assert.equal(await page.getByTestId('nav-settings').count(), 0, 'Duplicating Settings navigation is removed');
-  await poll(async () => assert.equal(await page.getByTestId('node-provider-auth-fixture').innerText(), 'Вход подтверждён'), 'Provider authentication is visible in the Nodes table');
+  await poll(async () => assert.equal(await page.getByTestId('node-provider-auth-fixture').innerText(), 'Аккаунт подключён'), 'Provider authentication is visible in the Nodes table');
   await page.getByTestId('node-row-fixture').getByRole('button').click();
   await page.getByTestId('provider-auth').waitFor();
   assert.equal(await page.getByTestId('provider-auth').count(), 1, 'Provider auth exists once in the unified Nodes inspector');
