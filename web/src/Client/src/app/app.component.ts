@@ -13,6 +13,7 @@ import { firstValueFrom } from 'rxjs';
 import { ToolCallDetail, ToolCallRead, ToolCallSummary } from './dialogs/dialogs.models';
 import { ToolActivityComponent } from './dialogs/tool-activity.component';
 import { ToolActivityGroup, ToolActivitySelection, ToolActivityState } from './dialogs/tool-activity.models';
+import { NodeSettingsComponent } from './node-settings.component';
 
 interface Observation {
   attemptedAt: string | null;
@@ -184,7 +185,7 @@ type RefreshTarget = Resource | 'dialogs';
 @Component({
   selector: 'app-root',
   standalone: true,
-  imports: [CommonModule, FormsModule, DialogsComponent, ProviderAuthComponent, MarkdownRendererComponent, ToolActivityComponent, UiIconComponent],
+  imports: [CommonModule, FormsModule, DialogsComponent, ProviderAuthComponent, NodeSettingsComponent, MarkdownRendererComponent, ToolActivityComponent, UiIconComponent],
   templateUrl: './app.component.html'
 })
 export class AppComponent implements OnInit, OnDestroy {

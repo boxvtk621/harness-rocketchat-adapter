@@ -48,15 +48,17 @@ app.UseAuthentication();
 app.UseAuthorization();
 app.Use(async (context, next) =>
 {
-    var sensitive = context.Request.Path.Value?.Contains("/provider-auth", StringComparison.OrdinalIgnoreCase) == true;
+    var sensitive = context.Request.Path.Value?.Contains("/provider-auth", StringComparison.OrdinalIgnoreCase) == true ||
+        context.Request.Path.Value?.Contains("/node-settings", StringComparison.OrdinalIgnoreCase) == true;
     if (sensitive)
     {
         context.Response.Headers.CacheControl = "no-store";
         context.Response.Headers.Pragma = "no-cache";
         context.Response.Headers["Referrer-Policy"] = "no-referrer";
         var size = context.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpMaxRequestBodySizeFeature>();
-        if (size is { IsReadOnly: false }) size.MaxRequestBodySize = 32768;
-        if (context.Request.ContentLength is > 32768)
+        var limit = context.Request.Path.Value?.Contains("/node-settings", StringComparison.OrdinalIgnoreCase) == true ? 262144 : 32768;
+        if (size is { IsReadOnly: false }) size.MaxRequestBodySize = limit;
+        if (context.Request.ContentLength > limit)
         {
             context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
             return;
@@ -99,12 +101,16 @@ app.MapGet("/api/realtime/token", (ClaimsPrincipal user) =>
     return Results.Ok(new { token = handler.WriteToken(handler.CreateToken(descriptor)) });
 }).RequireAuthorization();
 
-app.MapMethods("/api/connections/{**path}", ["GET", "POST", "PUT", "DELETE"], ProxyToAdapter)
-    .RequireAuthorization();
 app.MapMethods("/api/connections/{id}/provider-auth/{**authPath}", ["GET", "POST"],
     (HttpContext context, IHttpClientFactory factory, string id, string? authPath) =>
         ProxyToAdapter(context, factory, $"{id}/provider-auth" + (string.IsNullOrEmpty(authPath) ? "" : $"/{authPath}")))
     .RequireAuthorization("connections.manage");
+app.MapMethods("/api/connections/{id}/node-settings/{**settingsPath}", ["GET", "POST", "PUT"],
+    (HttpContext context, IHttpClientFactory factory, string id, string? settingsPath) =>
+        ProxyToAdapter(context, factory, $"{id}/node-settings" + (string.IsNullOrEmpty(settingsPath) ? "" : $"/{settingsPath}")))
+    .RequireAuthorization("connections.manage");
+app.MapMethods("/api/connections/{**path}", ["GET", "POST", "PUT", "DELETE"], ProxyToAdapter)
+    .RequireAuthorization();
 app.MapMethods("/api/connections", ["GET", "POST"], ProxyToAdapter)
     .RequireAuthorization();
 app.MapGet("/api/projections/nodes", (HttpContext context, IHttpClientFactory factory) => ProxyToAdapter(context, factory, "projections/nodes")).RequireAuthorization();
@@ -121,7 +127,8 @@ async Task ProxyToAdapter(HttpContext context, IHttpClientFactory factory, strin
     var target = string.IsNullOrEmpty(path) ? "api/connections" :
         path.StartsWith("projections/", StringComparison.Ordinal) || path.StartsWith("dialogs/", StringComparison.Ordinal)
             ? $"api/{path}" : $"api/connections/{path}";
-    if (target.StartsWith("api/dialogs/", StringComparison.Ordinal)) context.Response.Headers.CacheControl = "no-store";
+    var nodeSettings = target.Contains("/node-settings", StringComparison.Ordinal);
+    if (target.StartsWith("api/dialogs/", StringComparison.Ordinal) || nodeSettings) context.Response.Headers.CacheControl = "no-store";
     using var request = new HttpRequestMessage(new HttpMethod(context.Request.Method), target + context.Request.QueryString);
     if (target.StartsWith("api/dialogs/", StringComparison.Ordinal) && HttpMethods.IsPost(context.Request.Method))
         foreach (var header in new[] { "X-Harness-Expected-Node-ID", "X-Harness-Expected-Registry-Version", "X-Harness-Expected-Identity-Epoch", "X-Harness-Expected-Adapter-Kind", "X-Harness-Expected-Adapter-Version" })
@@ -129,7 +136,9 @@ async Task ProxyToAdapter(HttpContext context, IHttpClientFactory factory, strin
 
     if (context.Request.ContentLength is > 0 || context.Request.Headers.ContainsKey("Transfer-Encoding"))
     {
-        if (context.Request.Path.Value?.Contains("/provider-auth", StringComparison.OrdinalIgnoreCase) == true)
+        var boundedLimit = nodeSettings ? 262144 :
+            context.Request.Path.Value?.Contains("/provider-auth", StringComparison.OrdinalIgnoreCase) == true ? 32768 : 0;
+        if (boundedLimit > 0)
         {
             // Read at most one bounded command before forwarding anything upstream.
             // This is transient memory, never request logging or persistent storage.
@@ -140,7 +149,7 @@ async Task ProxyToAdapter(HttpContext context, IHttpClientFactory factory, strin
                 int length;
                 while ((length = await context.Request.Body.ReadAsync(chunk, context.RequestAborted)) > 0)
                 {
-                    if (bounded.Length + length > 32768)
+                    if (bounded.Length + length > boundedLimit)
                     {
                         context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
                         return;

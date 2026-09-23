@@ -16,6 +16,7 @@ builder.Services.AddOptions<HarnessOptions>().BindConfiguration("Harness").Valid
 builder.Services.AddSingleton<IMongoClient>(sp => new MongoClient(sp.GetRequiredService<IOptions<MongoOptions>>().Value.ConnectionString));
 builder.Services.AddSingleton<IConnectionRepository, MongoConnectionRepository>();
 builder.Services.AddSingleton<HarnessAddressPolicy>();
+builder.Services.AddSingleton<ConnectionDispatchFence>();
 builder.Services.AddDialogServices();
 builder.Logging.AddFilter("System.Net.Http.HttpClient.IDialogHarnessClient", LogLevel.Warning);
 builder.Services.AddHttpClient<IHarnessClient, HarnessClient>(client =>
@@ -28,6 +29,9 @@ builder.Logging.AddFilter("System.Net.Http.HttpClient.HarnessClient", LogLevel.W
 builder.Services.AddHttpClient<IProviderAuthClient, ProviderAuthClient>(client => client.Timeout = Timeout.InfiniteTimeSpan)
     .ConfigurePrimaryHttpMessageHandler(sp => HarnessTls.CreateHandler(sp.GetRequiredService<IOptions<HarnessOptions>>()));
 builder.Logging.AddFilter("System.Net.Http.HttpClient.IProviderAuthClient", LogLevel.None);
+builder.Services.AddHttpClient<INodeSettingsClient, NodeSettingsClient>(client => client.Timeout = Timeout.InfiniteTimeSpan)
+    .ConfigurePrimaryHttpMessageHandler(sp => HarnessTls.CreateHandler(sp.GetRequiredService<IOptions<HarnessOptions>>()));
+builder.Logging.AddFilter("System.Net.Http.HttpClient.INodeSettingsClient", LogLevel.None);
 builder.Services.AddHostedService<HarnessObservationService>();
 builder.Services.AddHostedService<HarnessEventInvalidationService>();
 builder.Services.AddHttpClient<ICentrifugoPublisher, CentrifugoPublisher>();
@@ -36,12 +40,14 @@ builder.Services.AddHealthChecks().AddCheck<MongoReadinessHealthCheck>("mongodb-
 var app = builder.Build();
 app.Use(async (context, next) =>
 {
-    if (context.Request.Path.Value?.Contains("/provider-auth", StringComparison.OrdinalIgnoreCase) == true)
+    if (context.Request.Path.Value?.Contains("/provider-auth", StringComparison.OrdinalIgnoreCase) == true ||
+        context.Request.Path.Value?.Contains("/node-settings", StringComparison.OrdinalIgnoreCase) == true)
     {
         context.Response.Headers.CacheControl = "no-store";
         var size = context.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpMaxRequestBodySizeFeature>();
-        if (size is { IsReadOnly: false }) size.MaxRequestBodySize = 32768;
-        if (context.Request.ContentLength is > 32768)
+        var limit = context.Request.Path.Value?.Contains("/node-settings", StringComparison.OrdinalIgnoreCase) == true ? 262144 : 32768;
+        if (size is { IsReadOnly: false }) size.MaxRequestBodySize = limit;
+        if (context.Request.ContentLength > limit)
         {
             context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
             return;
@@ -55,6 +61,7 @@ app.MapHealthChecks("/health/ready", new HealthCheckOptions { Predicate = check 
 
 var connections = app.MapGroup("/api/connections").RequireInternalToken();
 connections.MapProviderAuth();
+connections.MapNodeSettings();
 connections.MapGet("/", async (IConnectionRepository store, CancellationToken ct) =>
 {
     var items = await store.ListAsync(ct);
@@ -92,10 +99,12 @@ connections.MapPost("/", async (ConnectionRequest input, IConnectionRepository s
     return Results.Created($"/api/connections/{result.Connection.Id}", response);
 });
 connections.MapPut("/{id}", async (string id, ConnectionRequest input, IConnectionRepository store,
-    HarnessAddressPolicy addresses, ICentrifugoPublisher publisher, ILoggerFactory logs, CancellationToken ct) =>
+    HarnessAddressPolicy addresses, ICentrifugoPublisher publisher, ILoggerFactory logs,
+    ConnectionDispatchFence fence, CancellationToken ct) =>
 {
     var validation = ConnectionInput.Validate(input, addresses);
     if (validation.Error is not null) return Results.ValidationProblem(validation.Error);
+    await using var dispatchLease = await fence.EnterAsync(id, ct);
     var old = await store.GetAsync(id, ct);
     if (old is null) return Results.NotFound();
     var uriChanged = !string.Equals(old.BaseUri, validation.BaseUri, StringComparison.Ordinal);
