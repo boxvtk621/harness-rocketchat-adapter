@@ -857,6 +857,7 @@ export class AppComponent implements OnInit, OnDestroy {
   errorFor(resource: Resource): string { return this.resourceErrors()[resource]; }
   trackConnection(_: number, item: Connection): string { return item.id; }
   trackNode(_: number, item: NodeProjection): string { return item.connectionId; }
+  trackManagedNode(_: number, item: ManagedNodeRow): string { return item.connection.id; }
   trackGroup(_: number, group: { key: string }): string { return group.key; }
   readonly trackWork = (_: number, item: WorkProjection): string => this.workKey(item);
   trackHistory(_: number, item: HistoryRow): string { return item.key; }

@@ -181,7 +181,7 @@ tbody tr:not(.group-row):hover, tbody tr.selected { background: var(--selected);
 .settings-revisions { display: flex; gap: var(--space-3); margin: var(--space-2) 0; color: var(--muted); font-size: .846rem; font-variant-numeric: tabular-nums; }
 .settings-fieldset { display: grid; gap: var(--space-2); margin: var(--space-3) 0 0; padding: var(--space-3); border: 1px solid var(--line); border-radius: var(--radius); }
 .settings-fieldset legend { padding: 0 var(--space-1); color: var(--ink); font-size: .846rem; font-weight: 650; letter-spacing: .035em; text-transform: uppercase; }
-.settings-grid { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) minmax(0, 1fr); gap: var(--space-2); }
+.settings-grid { display: grid; align-items: end; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) minmax(0, 1fr); gap: var(--space-2); }
 .settings-grid.compact { grid-template-columns: minmax(120px, .75fr) minmax(0, 1.25fr); }
 .catalog-line, .mcp-row-head, .mcp-row-foot, .settings-error { display: flex; align-items: center; gap: var(--space-2); }
 .catalog-line .status { margin-right: auto; }

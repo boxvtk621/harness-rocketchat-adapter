@@ -1,6 +1,6 @@
 import { CommonModule } from '@angular/common';
 import { HttpClient, HttpErrorResponse, HttpHeaders } from '@angular/common/http';
-import { Component, EventEmitter, Input, OnChanges, OnDestroy, Output, signal } from '@angular/core';
+import { Component, EventEmitter, Input, OnChanges, OnDestroy, Output, SimpleChanges, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 
 interface AuthOperation {
@@ -105,7 +105,9 @@ export class ProviderAuthComponent implements OnChanges, OnDestroy {
   pendingMethod?: string;
   constructor(private readonly http: HttpClient) {}
 
-  ngOnChanges(): void {
+  @Input() sessionKey = '';
+  ngOnChanges(changes: SimpleChanges): void {
+    if (this.sessionKey && Object.keys(changes).every(key => key === 'accessToken') && !changes['accessToken']?.firstChange) return;
     this.generation++; this.secret = ''; this.snapshot.set(null); this.error.set('');
     this.busy.set(false); this.loading.set(false); this.uncertain.set(false); this.confirmLogout.set(false);
     this.pendingCommand = undefined; this.pendingAction = undefined; this.pendingMethod = undefined; this.reading = false;

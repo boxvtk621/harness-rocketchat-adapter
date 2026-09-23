@@ -1,6 +1,6 @@
 import { CommonModule } from '@angular/common';
 import { HttpClient, HttpErrorResponse, HttpHeaders, HttpParams } from '@angular/common/http';
-import { Component, Input, OnChanges, OnDestroy, signal } from '@angular/core';
+import { Component, Input, OnChanges, OnDestroy, SimpleChanges, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { buildNodeSettingsPutPayload, McpServer, SettingsSnapshot } from './node-settings-contract';
 interface SettingsOperation { operationId: string; commandId: string; targetRevision: number; status: string; phase: string; reasonCode?: string | null; }
@@ -22,14 +22,16 @@ interface ModelCatalog {
     <section class="node-settings inspector-card" data-testid="node-settings" aria-labelledby="node-settings-title">
       <div class="inspector-section-head">
         <div><h3 id="node-settings-title">Исполнение</h3><p>MCP и модель для всех диалогов этой ноды.</p></div>
-        <span *ngIf="envelope() as value" [class]="'status ' + (value.draftRevision===value.appliedRevision ? 'ready' : 'unknown')">{{ value.draftRevision===value.appliedRevision ? 'Применено' : 'Есть черновик' }}</span>
+        <span *ngIf="envelope()" [class]="'status ' + (settingsApplied() ? 'ready' : 'unknown')">{{ settingsStatus() }}</span>
       </div>
       <p *ngIf="!canManage" class="muted">Доступно пользователям с правом управления подключениями.</p>
       <p *ngIf="canManage && (!nodeId || conflict)" class="muted">Сначала требуется подтверждённая уникальная нода.</p>
-      <p *ngIf="loading()" role="status">Загрузка настроек…</p>
+        <p *ngIf="loading() && !envelope()" role="status">Загрузка настроек…</p>
       <div *ngIf="error()" class="settings-error" role="alert"><span>{{ error() }}</span><button type="button" (click)="read()">Повторить</button></div>
       <ng-container *ngIf="canManage && envelope() as value">
         <div class="settings-revisions" aria-label="Ревизии настроек"><span>Черновик <strong>{{ value.draftRevision }}</strong></span><span>Применено <strong>{{ value.appliedRevision }}</strong></span></div>
+        <p class="hint" role="status" data-testid="settings-guidance">{{ settingsGuidance() }}</p>
+        <p *ngIf="applyUnsupported()" class="hint" data-testid="settings-apply-unavailable">Эта нода не поддерживает применение настроек через Web. Сохранение черновика не изменит работающую модель. Для смены модели требуется обновление конфигурации и перезапуск ноды администратором.</p>
 
         <fieldset class="settings-fieldset" *ngIf="draft() as settings" [disabled]="busy()">
           <legend>Модель</legend>
@@ -83,8 +85,8 @@ interface ModelCatalog {
         </fieldset>
 
         <div class="actions settings-actions">
-          <button data-testid="settings-save" type="button" (click)="saveDraft()" [disabled]="busy() || !draft()">Сохранить черновик</button>
-          <button data-testid="settings-apply" class="primary" type="button" (click)="confirmApply.set(true)" [disabled]="busy() || value.draftRevision===value.appliedRevision">Применить ревизию {{ value.draftRevision }}</button>
+          <button data-testid="settings-save" type="button" (click)="saveDraft()" [disabled]="busy() || !hasUnsavedChanges()">Сохранить черновик</button>
+          <button data-testid="settings-apply" class="primary" type="button" (click)="confirmApply.set(true)" [disabled]="busy() || hasUnsavedChanges() || applyUnsupported() || value.draftRevision===value.appliedRevision">{{ applyUnsupported() ? 'Применение недоступно' : 'Применить ревизию ' + value.draftRevision }}</button>
         </div>
         <div *ngIf="confirmApply()" class="apply-confirm" role="group" aria-label="Подтверждение применения настроек">
           <strong>Применить ревизию {{ value.draftRevision }}?</strong>
@@ -92,7 +94,7 @@ interface ModelCatalog {
           <div class="actions"><button data-testid="settings-confirm-apply" class="primary" type="button" (click)="apply()" [disabled]="busy()">Подтвердить</button><button type="button" (click)="confirmApply.set(false)" [disabled]="busy()">Отмена</button></div>
         </div>
         <div *ngIf="value.operation as operation" class="settings-operation" role="status"><span>Операция {{ operation.phase || operation.status }}</span><strong>{{ operationLabel(operation) }}</strong></div>
-        <p class="hint">Применение начнётся на границе попыток. MCP может потребовать управляемого перезапуска процесса агента; контейнер не перезапускается.</p>
+        <p *ngIf="!applyUnsupported()" class="hint">Применение начнётся на границе попыток. MCP может потребовать управляемого перезапуска процесса агента; контейнер не перезапускается.</p>
       </ng-container>
     </section>`
 })
@@ -101,6 +103,7 @@ export class NodeSettingsComponent implements OnChanges, OnDestroy {
   @Input() nodeId: string | null = null;
   @Input() configEpoch = 0;
   @Input() accessToken = '';
+  @Input() sessionKey = '';
   @Input() canManage = false;
   @Input() conflict = false;
   readonly envelope = signal<SettingsEnvelope | null>(null);
@@ -110,9 +113,11 @@ export class NodeSettingsComponent implements OnChanges, OnDestroy {
   readonly error = signal(''); readonly checkingId = signal(''); readonly checkResults = signal<Record<string, string>>({});
   readonly confirmApply = signal(false);
   private generation = 0; private poll?: number;
+  private savedDraft = '';
   constructor(private readonly http: HttpClient) {}
 
-  ngOnChanges(): void {
+  ngOnChanges(changes: SimpleChanges): void {
+    if (this.sessionKey && Object.keys(changes).every(key => key === 'accessToken') && !changes['accessToken']?.firstChange) return;
     this.generation++; this.clearSecrets();
     if (this.poll !== undefined) { window.clearInterval(this.poll); this.poll = undefined; }
     this.envelope.set(null); this.draft.set(null); this.catalog.set(null); this.error.set(''); this.confirmApply.set(false);
@@ -163,7 +168,7 @@ export class NodeSettingsComponent implements OnChanges, OnDestroy {
     this.mutate('PUT', '', payload);
   }
   apply(): void {
-    const current = this.envelope(); if (!current || this.busy()) return;
+    const current = this.envelope(); if (!current || this.busy() || this.hasUnsavedChanges() || this.applyUnsupported() || current.draftRevision === current.appliedRevision) return;
     this.confirmApply.set(false);
     this.mutate('POST', '/apply', { expectedRevision: current.draftRevision, targetRevision: current.draftRevision, commandId: crypto.randomUUID() });
   }
@@ -193,6 +198,16 @@ export class NodeSettingsComponent implements OnChanges, OnDestroy {
     if (!model.reasoningEfforts.some(x => x.id === settings.inference.reasoningEffort)) settings.inference.reasoningEffort = null;
   }
   selectedModel(): ModelChoice | undefined { const id = this.draft()?.inference.modelId; return id ? this.catalog()?.models.find(x => x.id === id) : undefined; }
+  hasUnsavedChanges(): boolean { return !!this.draft() && JSON.stringify(this.draft()) !== this.savedDraft; }
+  applyUnsupported(): boolean { return this.envelope()?.capabilities?.['nativeRestart'] === 'unsupported'; }
+  settingsApplied(): boolean { const value = this.envelope(); return !!value?.applied && value.draftRevision === value.appliedRevision && !this.hasUnsavedChanges(); }
+  settingsStatus(): string { return this.hasUnsavedChanges() ? 'Не сохранено' : this.settingsApplied() ? 'Применено' : this.envelope()?.draftRevision === 0 ? 'Исходные настройки' : 'Есть черновик'; }
+  settingsGuidance(): string {
+    if (this.hasUnsavedChanges()) return 'Есть несохранённые изменения. Нажмите «Сохранить черновик». Работающая модель пока не изменена.';
+    if (this.settingsApplied()) return 'Сохранённые настройки применены к ноде.';
+    if (this.envelope()?.draftRevision === 0) return 'Настройки через Web ещё не применялись. Выбор в форме не меняет работающую модель.';
+    return this.applyUnsupported() ? 'Черновик сохранён, но не применён к ноде.' : 'Черновик сохранён. Нажмите «Применить ревизию» и подтвердите изменение.';
+  }
   catalogLabel(): string { return ({ fresh: 'Каталог актуален', stale: 'Каталог устарел', unavailable: 'Каталог недоступен', unsupported: 'Каталог не поддерживается' } as Record<string,string>)[this.catalog()?.state || 'unavailable']; }
   catalogClass(): string { return this.catalog()?.state === 'fresh' ? 'ready' : this.catalog()?.state === 'stale' ? 'unknown' : 'attention'; }
   operationLabel(value: SettingsOperation): string { return ({ queued: 'В очереди', running: 'Выполняется', succeeded: 'Применено', failed: 'Не применено', cancelled: 'Отменено' } as Record<string,string>)[value.status] || value.status; }
@@ -218,6 +233,7 @@ export class NodeSettingsComponent implements OnChanges, OnDestroy {
         ? (server.auth.bearerTokenConfigured ? 'keep' : 'replace')
         : 'remove';
     }
+    this.savedDraft = JSON.stringify(this.draft());
     if (value.operation && ['queued', 'running'].includes(value.operation.status)) this.startPolling();
     else if (this.poll !== undefined) { window.clearInterval(this.poll); this.poll = undefined; }
   }
@@ -226,7 +242,7 @@ export class NodeSettingsComponent implements OnChanges, OnDestroy {
     return item?.schemaId === 'harness-node-settings-v1' && item.nodeId === this.nodeId && Number.isInteger(item.draftRevision) &&
       Number.isInteger(item.appliedRevision) && Array.isArray(item.draft?.mcpServers) && !!item.draft?.inference;
   }
-  private startPolling(): void { if (this.poll === undefined) this.poll = window.setInterval(() => { if (!document.hidden && !this.loading()) this.read(); }, 2000); }
+  private startPolling(): void { if (this.poll === undefined) this.poll = window.setInterval(() => { if (!document.hidden && !this.loading() && !this.busy() && !this.hasUnsavedChanges()) this.read(); }, 2000); }
   private clearSecrets(): void { for (const server of this.draft()?.mcpServers || []) server.auth.secret = undefined; }
   private failureLabel(failure: HttpErrorResponse): string {
     if (failure.status === 401) return 'Сессия Web истекла. Войдите снова.';
