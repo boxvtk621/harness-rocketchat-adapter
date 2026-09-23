@@ -246,7 +246,7 @@ export class NodeSettingsComponent implements OnChanges, OnDestroy {
     return !!selected && !choices.some(choice => choice.id === selected);
   }
   hasUnsavedChanges(): boolean { return !!this.draft() && JSON.stringify(this.draft()) !== this.savedDraft; }
-  applyUnsupported(): boolean { return this.envelope()?.capabilities?.['nativeRestart'] === 'unsupported'; }
+  applyUnsupported(): boolean { return !['supported', 'managed'].includes(String(this.envelope()?.capabilities?.['nativeRestart'] || '')); }
   operationInFlight(): boolean { return ['pending', 'queued', 'running'].includes(this.envelope()?.operation?.status || ''); }
   settingsApplied(): boolean { const value = this.envelope(); return !!value?.applied && value.draftRevision === value.appliedRevision && !this.hasUnsavedChanges() && value.operation?.status !== 'failed'; }
   settingsStatus(): string { return this.operationInFlight() ? 'Применяется' : this.hasUnsavedChanges() ? 'Не применено' : this.settingsApplied() ? 'Применено' : this.envelope()?.draftRevision === 0 ? 'Исходные настройки' : 'Не применено'; }

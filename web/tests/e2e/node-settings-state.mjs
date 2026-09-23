@@ -24,6 +24,8 @@ settings.apply();assert.equal(writes,0,'Unsaved/unsupported configuration cannot
 settings.accept({...structuredClone(saved),draftRevision:1});
 settings.apply();assert.equal(writes,0,'Unsupported apply is blocked after save too');
 assert.match(settings.settingsGuidance(),/отличаются от работающих/);
+settings.accept({...structuredClone(saved),capabilities:{}});
+assert.equal(settings.applyUnsupported(),true,'Missing capability fails closed');
 settings.ngOnChanges({sessionKey:{firstChange:false}});
 assert.equal(settings.draft(),null,'Another session clears configuration');
 
