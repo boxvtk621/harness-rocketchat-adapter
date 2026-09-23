@@ -32,7 +32,7 @@ interface ModelCatalog {
         <p class="hint" role="status" data-testid="settings-guidance">{{ settingsGuidance() }}</p>
         <div class="settings-effective" data-testid="settings-effective" aria-label="Работающие настройки">
           <strong>Работает сейчас</strong>
-          <span *ngIf="value.applied; else unverifiedSettings">Модель: {{ value.applied.inference.modelId || 'по умолчанию провайдера' }} · Скорость: {{ value.applied.inference.speedMode || 'по умолчанию' }} · Рассуждения: {{ value.applied.inference.reasoningEffort || 'по умолчанию' }}</span>
+          <span *ngIf="value.applied; else unverifiedSettings">Модель: {{ value.applied.inference.modelId || 'модель ноды по умолчанию' }} · Скорость: {{ value.applied.inference.speedMode || 'по умолчанию' }} · Рассуждения: {{ value.applied.inference.reasoningEffort || 'по умолчанию' }}</span>
           <span *ngIf="value.applied">MCP: {{ appliedMcpNames(value.applied) }}</span>
           <ng-template #unverifiedSettings><span>Применённые значения пока не подтверждены нодой.</span></ng-template>
         </div>
@@ -50,7 +50,8 @@ interface ModelCatalog {
             </label>
             <label>Режим скорости
               <select data-testid="node-speed" [(ngModel)]="settings.inference.speedMode" [disabled]="!selectedModel()?.speedModes?.length && !settings.inference.speedMode">
-                <option [ngValue]="null">По умолчанию провайдера</option>
+                <option *ngIf="modelDefaultSupported()" [ngValue]="null">Модель ноды по умолчанию</option>
+                <option *ngIf="!modelDefaultSupported() && settings.inference.modelId===null" [ngValue]="null" disabled>Выберите модель из каталога</option>
                 <option *ngIf="incompatibleChoice('speed')" [value]="settings.inference.speedMode">{{ settings.inference.speedMode }} (недоступен для выбранной модели)</option>
                 <option *ngFor="let item of selectedModel()?.speedModes || []; trackBy: trackChoice" [value]="item.id">{{ item.id }}</option>
               </select>
@@ -69,6 +70,7 @@ interface ModelCatalog {
             <button *ngIf="catalog()?.nextCursor" type="button" (click)="loadCatalog(false)" [disabled]="catalogLoading()">Ещё модели</button>
           </div>
           <p class="hint">Список и допустимые сочетания сообщает текущая Harness под её авторизацией. Режим скорости не заменяет глубину рассуждений.</p>
+          <p *ngIf="modelRequired()" class="hint" role="alert">Эта нода требует выбрать модель из каталога.</p>
           <p *ngIf="incompatibleChoice('speed') || incompatibleChoice('reasoning')" class="hint" role="alert">Прежнее значение недоступно для выбранной модели. Выберите поддерживаемое значение или режим провайдера по умолчанию.</p>
         </fieldset>
 
@@ -93,7 +95,7 @@ interface ModelCatalog {
         </fieldset>
 
         <div class="actions settings-actions">
-          <button data-testid="settings-apply" class="primary" type="button" (click)="confirmApply.set(true)" [disabled]="busy() || operationInFlight() || applyUnsupported() || incompatibleChoice('speed') || incompatibleChoice('reasoning') || (!hasUnsavedChanges() && value.draftRevision===value.appliedRevision)">{{ busy() ? 'Применяем…' : 'Применить изменения' }}</button>
+          <button data-testid="settings-apply" class="primary" type="button" (click)="confirmApply.set(true)" [disabled]="busy() || operationInFlight() || applyUnsupported() || modelRequired() || incompatibleChoice('speed') || incompatibleChoice('reasoning') || (!hasUnsavedChanges() && value.draftRevision===value.appliedRevision)">{{ busy() ? 'Применяем…' : 'Применить изменения' }}</button>
         </div>
         <div *ngIf="confirmApply()" class="apply-confirm" role="group" aria-label="Подтверждение применения настроек">
           <strong>Применить изменения ко всем диалогам ноды?</strong>
@@ -171,7 +173,7 @@ export class NodeSettingsComponent implements OnChanges, OnDestroy {
     });
   }
   apply(): void {
-    const current = this.envelope(); if (!current || this.busy() || this.operationInFlight() || this.applyUnsupported() || this.incompatibleChoice('speed') || this.incompatibleChoice('reasoning')) return;
+    const current = this.envelope(); if (!current || this.busy() || this.operationInFlight() || this.applyUnsupported() || this.modelRequired() || this.incompatibleChoice('speed') || this.incompatibleChoice('reasoning')) return;
     this.confirmApply.set(false);
     if (this.hasUnsavedChanges()) {
       const settings = this.draft(); if (!settings) return;
@@ -247,6 +249,8 @@ export class NodeSettingsComponent implements OnChanges, OnDestroy {
   }
   hasUnsavedChanges(): boolean { return !!this.draft() && JSON.stringify(this.draft()) !== this.savedDraft; }
   applyUnsupported(): boolean { return !['supported', 'managed'].includes(String(this.envelope()?.capabilities?.['nativeRestart'] || '')); }
+  modelDefaultSupported(): boolean { return this.envelope()?.capabilities?.['modelDefault'] === 'supported'; }
+  modelRequired(): boolean { return this.draft()?.inference.modelId === null && !this.modelDefaultSupported(); }
   operationInFlight(): boolean { return ['pending', 'queued', 'running'].includes(this.envelope()?.operation?.status || ''); }
   settingsApplied(): boolean { const value = this.envelope(); return !!value?.applied && value.draftRevision === value.appliedRevision && !this.hasUnsavedChanges() && value.operation?.status !== 'failed'; }
   settingsStatus(): string { return this.operationInFlight() ? 'Применяется' : this.hasUnsavedChanges() ? 'Не применено' : this.settingsApplied() ? 'Применено' : this.envelope()?.draftRevision === 0 ? 'Исходные настройки' : 'Не применено'; }
@@ -266,6 +270,8 @@ export class NodeSettingsComponent implements OnChanges, OnDestroy {
   operationReasonLabel(code: string): string {
     return ({ catalog_unavailable: 'Каталог моделей недоступен.', model_unavailable: 'Модель недоступна для этой ноды.',
       model_parameter_unsupported: 'Этот параметр не поддерживается моделью.', model_parameters_incompatible: 'Выбранные параметры несовместимы.',
+      model_default_unsupported: 'Эта нода требует выбрать модель из каталога.',
+      mcp_timeout_unsupported: 'Эта нода не поддерживает изменение таймаута MCP.',
       parameter_unsupported: 'Этот параметр не поддерживается нодой.', active_attempt_timeout: 'Текущая работа не завершилась за отведённое время.',
       drain_timeout: 'Текущая работа не завершилась за отведённое время.', native_restart_failed: 'Процесс агента не запустился с новыми настройками.',
       rollback_failed: 'Не удалось восстановить прежний процесс; нода пока не готова к работе.',

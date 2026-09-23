@@ -26,12 +26,16 @@ settings.apply();assert.equal(writes,0,'Unsupported apply is blocked after save 
 assert.match(settings.settingsGuidance(),/отличаются от работающих/);
 settings.accept({...structuredClone(saved),capabilities:{}});
 assert.equal(settings.applyUnsupported(),true,'Missing capability fails closed');
+settings.accept({...structuredClone(saved),capabilities:{nativeRestart:'supported',modelDefault:'unsupported'}});
+assert.equal(settings.modelRequired(),true,'Unsupported implicit model requires a catalog choice');
+settings.accept({...structuredClone(saved),capabilities:{nativeRestart:'managed',modelDefault:'supported'}});
+assert.equal(settings.modelRequired(),false,'Explicitly supported node default remains selectable');
 settings.ngOnChanges({sessionKey:{firstChange:false}});
 assert.equal(settings.draft(),null,'Another session clears configuration');
 
 const calls=[];
 let loseAck=false;
-const returned={...structuredClone(saved),draftRevision:1,capabilities:{nativeRestart:'supported'}};
+const returned={...structuredClone(saved),draftRevision:1,draft:{...structuredClone(saved.draft),inference:{modelId:'selected-model',speedMode:null,reasoningEffort:null}},capabilities:{nativeRestart:'supported',modelDefault:'unsupported'}};
 const http={
   put(_url,body){calls.push({method:'PUT',body});return {subscribe(observer){observer.next(structuredClone(returned));}}},
   post(_url,body){calls.push({method:'POST',body});return {subscribe(observer){
