@@ -221,7 +221,7 @@ export class NodeSettingsComponent implements OnChanges, OnDestroy {
     if (this.checkingId() || this.hasUnsavedChanges()) return; this.checkingId.set(server.id);
     this.http.post<{ state?: string; reasonCode?: string; toolsCount?: number }>(this.base() + '/mcp-checks',
       { expectedRevision: this.envelope()?.draftRevision, mcpServerId: server.id }, { headers: this.headers(), params: this.params() }).subscribe({
-      next: value => { this.checkingId.set(''); const suffix = value.toolsCount === undefined ? '' : ` · инструментов: ${value.toolsCount}`; const reason = value.reasonCode ? ` · ${value.reasonCode}` : ''; this.checkResults.update(all => ({ ...all, [server.id]: `${value.state || 'Проверено'}${suffix}${reason}` })); },
+      next: value => { this.checkingId.set(''); const suffix = value.toolsCount === undefined ? '' : ` · инструментов: ${value.toolsCount}`; const reason = value.reasonCode && /^[a-z0-9_]{1,80}$/.test(value.reasonCode) ? ` · ${value.reasonCode}` : ''; this.checkResults.update(all => ({ ...all, [server.id]: `${value.state || 'Проверено'}${suffix}${reason}` })); },
       error: failure => { this.checkingId.set(''); this.checkResults.update(all => ({ ...all, [server.id]: this.failureLabel(failure) })); }
     });
   }
