@@ -178,7 +178,8 @@ tbody tr:not(.group-row):hover, tbody tr.selected { background: var(--selected);
 .provider-auth a { overflow-wrap: anywhere; }
 .device-code { display: inline-block; padding: 6px 10px; border: 1px solid var(--line); font-size: 1.15rem; letter-spacing: .12em; user-select: all; }
 .node-settings { margin-top: var(--space-3); }
-.settings-revisions { display: flex; gap: var(--space-3); margin: var(--space-2) 0; color: var(--muted); font-size: .846rem; font-variant-numeric: tabular-nums; }
+.settings-effective { display: grid; gap: var(--space-1); padding: var(--space-2); border-left: 3px solid var(--line-strong); background: var(--surface-alt); font-size: .923rem; overflow-wrap: anywhere; }
+.settings-effective strong { color: var(--ink); }
 .settings-fieldset { display: grid; gap: var(--space-2); margin: var(--space-3) 0 0; padding: var(--space-3); border: 1px solid var(--line); border-radius: var(--radius); }
 .settings-fieldset legend { padding: 0 var(--space-1); color: var(--ink); font-size: .846rem; font-weight: 650; letter-spacing: .035em; text-transform: uppercase; }
 .settings-grid { display: grid; align-items: end; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) minmax(0, 1fr); gap: var(--space-2); }
@@ -192,7 +193,7 @@ tbody tr:not(.group-row):hover, tbody tr.selected { background: var(--selected);
 .mcp-row .toggle input { width: auto; min-height: 18px; }
 .danger-text { border-color: transparent; background: transparent; color: var(--danger); }
 .settings-actions { margin-top: var(--space-3); justify-content: flex-end; }
-.settings-operation { display: flex; justify-content: space-between; gap: var(--space-2); margin-top: var(--space-2); padding: var(--space-2); border-left: 3px solid var(--focus); background: var(--focus-soft); }
+.settings-operation { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--space-2); margin-top: var(--space-2); padding: var(--space-2); border-left: 3px solid var(--focus); background: var(--focus-soft); overflow-wrap: anywhere; }
 .settings-error { justify-content: space-between; margin-top: var(--space-2); color: var(--danger); }
 .apply-confirm { margin-top: var(--space-2); padding: var(--space-3); border: 1px solid #d9c47a; border-left: 3px solid var(--warning); background: var(--warning-bg); }
 .apply-confirm p { color: #554717; }

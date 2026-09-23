@@ -8,6 +8,7 @@ await import(require.resolve('@angular/compiler'));
 const {NodeSettingsComponent}=await import('/app/node-settings-test.mjs');
 const {ProviderAuthComponent}=await import('/app/provider-auth-test.mjs');
 globalThis.window={clearInterval(){},setInterval(){return 1}};
+globalThis.document={hidden:false};
 let writes=0;
 const settings=new NodeSettingsComponent({post(){writes++;throw Error('unexpected write')}});
 settings.sessionKey='user:session';
@@ -16,18 +17,47 @@ settings.accept(structuredClone(saved));
 assert.equal(settings.settingsStatus(),'Исходные настройки');
 assert.equal(settings.hasUnsavedChanges(),false);
 settings.draft().inference.modelId='selected-model';
-assert.equal(settings.settingsStatus(),'Не сохранено');
+assert.equal(settings.settingsStatus(),'Не применено');
 settings.ngOnChanges({accessToken:{firstChange:false}});
 assert.equal(settings.draft().inference.modelId,'selected-model','Token renewal preserves unsaved selection');
 settings.apply();assert.equal(writes,0,'Unsaved/unsupported configuration cannot be applied');
 settings.accept({...structuredClone(saved),draftRevision:1});
 settings.apply();assert.equal(writes,0,'Unsupported apply is blocked after save too');
-assert.match(settings.settingsGuidance(),/не применён/);
+assert.match(settings.settingsGuidance(),/отличаются от работающих/);
 settings.ngOnChanges({sessionKey:{firstChange:false}});
 assert.equal(settings.draft(),null,'Another session clears configuration');
+
+const calls=[];
+let loseAck=false;
+const returned={...structuredClone(saved),draftRevision:1,capabilities:{nativeRestart:'supported'}};
+const http={
+  put(_url,body){calls.push({method:'PUT',body});return {subscribe(observer){observer.next(structuredClone(returned));}}},
+  post(_url,body){calls.push({method:'POST',body});return {subscribe(observer){
+    if(loseAck) observer.error({status:0});
+    else observer.next({nodeId:'node',operation:{operationId:crypto.randomUUID(),commandId:body.commandId,targetRevision:body.targetRevision,status:'running',phase:'draining'}});
+  }}},
+  get(){calls.push({method:'GET'});return {subscribe(observer){observer.next(structuredClone(returned));}}}
+};
+const active=new NodeSettingsComponent(http);
+active.nodeId='node';active.canManage=true;active.accept({...structuredClone(saved),capabilities:{nativeRestart:'supported'}});
+active.draft().inference.modelId='selected-model';
+active.apply();
+assert.deepEqual(calls.map(x=>x.method),['PUT','POST','GET']);
+assert.equal(calls[0].body.expectedRevision,0);
+assert.equal(calls[1].body.targetRevision,1);
+assert.equal(active.hasUnsavedChanges(),false);
+assert.equal(active.settingsStatus(),'Не применено');
+const firstCommand=calls[1].body.commandId;
+loseAck=true;
+active.apply();
+assert.equal(calls.at(-2).method,'POST');
+assert.equal(calls.at(-2).body.commandId,firstCommand,'Retry preserves commandId after an uncertain response');
+assert.equal(calls.at(-1).method,'GET','Uncertain response triggers readback');
+assert.equal(calls.filter(x=>x.method==='PUT').length,1,'Retry does not save a second draft');
+assert.match(active.error(),/Ответ о применении не получен/,'Unconfirmed result stays visible until readback finds the command');
 const auth=new ProviderAuthComponent({});auth.sessionKey='user:session';auth.snapshot.set({state:'authenticated'});auth.secret='not-a-real-secret';
 auth.ngOnChanges({accessToken:{firstChange:false}});
 assert.equal(auth.snapshot().state,'authenticated');assert.equal(auth.secret,'not-a-real-secret');
 auth.ngOnChanges({sessionKey:{firstChange:false}});
 assert.equal(auth.snapshot(),null);assert.equal(auth.secret,'');
-console.log('PASS settings state, unsupported apply, token renewal and session isolation');
+console.log('PASS settings state, one-action apply, lost ACK retry, token renewal and session isolation');

@@ -29,9 +29,14 @@ interface ModelCatalog {
         <p *ngIf="loading() && !envelope()" role="status">Загрузка настроек…</p>
       <div *ngIf="error()" class="settings-error" role="alert"><span>{{ error() }}</span><button type="button" (click)="read()">Повторить</button></div>
       <ng-container *ngIf="canManage && envelope() as value">
-        <div class="settings-revisions" aria-label="Ревизии настроек"><span>Черновик <strong>{{ value.draftRevision }}</strong></span><span>Применено <strong>{{ value.appliedRevision }}</strong></span></div>
         <p class="hint" role="status" data-testid="settings-guidance">{{ settingsGuidance() }}</p>
-        <p *ngIf="applyUnsupported()" class="hint" data-testid="settings-apply-unavailable">Эта нода не поддерживает применение настроек через Web. Сохранение черновика не изменит работающую модель. Для смены модели требуется обновление конфигурации и перезапуск ноды администратором.</p>
+        <div class="settings-effective" data-testid="settings-effective" aria-label="Работающие настройки">
+          <strong>Работает сейчас</strong>
+          <span *ngIf="value.applied; else unverifiedSettings">Модель: {{ value.applied.inference.modelId || 'по умолчанию провайдера' }} · Скорость: {{ value.applied.inference.speedMode || 'по умолчанию' }} · Рассуждения: {{ value.applied.inference.reasoningEffort || 'по умолчанию' }}</span>
+          <span *ngIf="value.applied">MCP: {{ appliedMcpNames(value.applied) }}</span>
+          <ng-template #unverifiedSettings><span>Применённые значения пока не подтверждены нодой.</span></ng-template>
+        </div>
+        <p *ngIf="applyUnsupported()" class="hint" data-testid="settings-apply-unavailable">Эта нода пока не поддерживает применение настроек. Работающие значения не изменились.</p>
 
         <fieldset class="settings-fieldset" *ngIf="draft() as settings" [disabled]="busy()">
           <legend>Модель</legend>
@@ -76,7 +81,7 @@ interface ModelCatalog {
               <label *ngIf="server.auth.kind==='bearer'">Bearer‑секрет
                 <select [(ngModel)]="server.auth.secretAction" (ngModelChange)="secretActionChanged(server)"><option *ngIf="server.auth.bearerTokenConfigured" value="keep">Не менять</option><option value="replace">Заменить</option><option *ngIf="server.auth.bearerTokenConfigured" value="remove">Удалить</option></select></label>
               <label *ngIf="server.auth.secretAction==='replace'">Новый секрет<input [(ngModel)]="server.auth.secret" type="password" maxlength="16384" autocomplete="new-password" spellcheck="false"></label>
-              <div class="mcp-row-foot"><span class="hint">{{ server.auth.bearerTokenConfigured ? 'Секрет настроен; значение скрыто.' : 'Секрет не настроен.' }}</span><button type="button" (click)="checkMcp(server)" [disabled]="checkingId()===server.id">{{ checkingId()===server.id ? 'Проверка…' : 'Проверить' }}</button></div>
+              <div class="mcp-row-foot"><span class="hint">{{ server.auth.bearerTokenConfigured ? 'Секрет настроен; значение скрыто.' : 'Секрет не настроен.' }}</span><button type="button" (click)="checkMcp(server)" [disabled]="checkingId()===server.id || hasUnsavedChanges()">{{ checkingId()===server.id ? 'Проверка…' : 'Проверить' }}</button></div>
               <p *ngIf="checkResults()[server.id]" class="hint" role="status">{{ checkResults()[server.id] }}</p>
             </article>
           </div>
@@ -85,16 +90,14 @@ interface ModelCatalog {
         </fieldset>
 
         <div class="actions settings-actions">
-          <button data-testid="settings-save" type="button" (click)="saveDraft()" [disabled]="busy() || !hasUnsavedChanges()">Сохранить черновик</button>
-          <button data-testid="settings-apply" class="primary" type="button" (click)="confirmApply.set(true)" [disabled]="busy() || hasUnsavedChanges() || applyUnsupported() || value.draftRevision===value.appliedRevision">{{ applyUnsupported() ? 'Применение недоступно' : 'Применить ревизию ' + value.draftRevision }}</button>
+          <button data-testid="settings-apply" class="primary" type="button" (click)="confirmApply.set(true)" [disabled]="busy() || operationInFlight() || applyUnsupported() || (!hasUnsavedChanges() && value.draftRevision===value.appliedRevision)">{{ busy() ? 'Применяем…' : 'Применить изменения' }}</button>
         </div>
         <div *ngIf="confirmApply()" class="apply-confirm" role="group" aria-label="Подтверждение применения настроек">
-          <strong>Применить ревизию {{ value.draftRevision }}?</strong>
-          <p>Активные попытки завершатся. Процесс агента может перезапуститься; контейнер, диалоги и история сохранятся.</p>
+          <strong>Применить изменения ко всем диалогам ноды?</strong>
+          <p>Текущие попытки сначала завершатся. Для новых настроек может потребоваться перезапуск процесса агента внутри контейнера. Диалоги и история сохранятся.</p>
           <div class="actions"><button data-testid="settings-confirm-apply" class="primary" type="button" (click)="apply()" [disabled]="busy()">Подтвердить</button><button type="button" (click)="confirmApply.set(false)" [disabled]="busy()">Отмена</button></div>
         </div>
-        <div *ngIf="value.operation as operation" class="settings-operation" role="status"><span>Операция {{ operation.phase || operation.status }}</span><strong>{{ operationLabel(operation) }}</strong></div>
-        <p *ngIf="!applyUnsupported()" class="hint">Применение начнётся на границе попыток. MCP может потребовать управляемого перезапуска процесса агента; контейнер не перезапускается.</p>
+        <div *ngIf="value.operation as operation" class="settings-operation" role="status"><span>{{ operationPhaseLabel(operation) }}</span><strong>{{ operationLabel(operation) }}</strong><span *ngIf="operation.status === 'failed' && operation.reasonCode">{{ operationReasonLabel(operation.reasonCode) }}</span></div>
       </ng-container>
     </section>`
 })
@@ -113,12 +116,14 @@ export class NodeSettingsComponent implements OnChanges, OnDestroy {
   readonly error = signal(''); readonly checkingId = signal(''); readonly checkResults = signal<Record<string, string>>({});
   readonly confirmApply = signal(false);
   private generation = 0; private poll?: number;
+  private pendingCommandId: string | null = null;
+  private pendingRevision: number | null = null;
   private savedDraft = '';
   constructor(private readonly http: HttpClient) {}
 
   ngOnChanges(changes: SimpleChanges): void {
     if (this.sessionKey && Object.keys(changes).every(key => key === 'accessToken') && !changes['accessToken']?.firstChange) return;
-    this.generation++; this.clearSecrets();
+    this.generation++; this.clearSecrets(); this.pendingCommandId = null; this.pendingRevision = null;
     if (this.poll !== undefined) { window.clearInterval(this.poll); this.poll = undefined; }
     this.envelope.set(null); this.draft.set(null); this.catalog.set(null); this.error.set(''); this.confirmApply.set(false);
     this.loading.set(false); this.catalogLoading.set(false); this.busy.set(false); this.checkingId.set(''); this.checkResults.set({});
@@ -132,9 +137,9 @@ export class NodeSettingsComponent implements OnChanges, OnDestroy {
     for (const [key, value] of Object.entries(extra)) params = params.set(key, value);
     return params;
   }
-  read(): void {
+  read(preserveError = false): void {
     if (!this.nodeId || !this.canManage || this.conflict || this.loading()) return;
-    const generation = this.generation; this.loading.set(true); this.error.set('');
+    const generation = this.generation; this.loading.set(true); if (!preserveError) this.error.set('');
     this.http.get<SettingsEnvelope>(this.base(), { headers: this.headers(), params: this.params() }).subscribe({
       next: value => {
         if (generation !== this.generation) return;
@@ -162,21 +167,58 @@ export class NodeSettingsComponent implements OnChanges, OnDestroy {
       error: () => { if (generation === this.generation) { this.catalog.set({ schemaId: 'harness-model-catalog-v1', nodeId: this.nodeId!, state: 'unavailable', models: [] }); this.catalogLoading.set(false); } }
     });
   }
-  saveDraft(): void {
-    const settings = this.draft(); const current = this.envelope(); if (!settings || !current || this.busy()) return;
-    const payload = buildNodeSettingsPutPayload(current.draftRevision, settings);
-    this.mutate('PUT', '', payload);
-  }
   apply(): void {
-    const current = this.envelope(); if (!current || this.busy() || this.hasUnsavedChanges() || this.applyUnsupported() || current.draftRevision === current.appliedRevision) return;
+    const current = this.envelope(); if (!current || this.busy() || this.operationInFlight() || this.applyUnsupported()) return;
     this.confirmApply.set(false);
-    this.mutate('POST', '/apply', { expectedRevision: current.draftRevision, targetRevision: current.draftRevision, commandId: crypto.randomUUID() });
+    if (this.hasUnsavedChanges()) {
+      const settings = this.draft(); if (!settings) return;
+      const generation = this.generation;
+      this.busy.set(true); this.error.set('');
+      this.http.put<SettingsEnvelope>(this.base(), buildNodeSettingsPutPayload(current.draftRevision, settings),
+        { headers: this.headers(), params: this.params() }).subscribe({
+          next: value => {
+            if (generation !== this.generation) return;
+            if (!this.validEnvelope(value)) { this.busy.set(false); this.error.set('Не удалось подтвердить сохранение настроек. Обновите состояние.'); return; }
+            this.accept(value);
+            this.sendApply(value.draftRevision);
+          },
+          error: failure => {
+            if (generation !== this.generation) return;
+            this.busy.set(false); this.error.set(this.failureLabel(failure));
+          }
+        });
+      return;
+    }
+    if (current.draftRevision !== current.appliedRevision) this.sendApply(current.draftRevision);
+  }
+  private sendApply(revision: number): void {
+    if (this.pendingRevision !== revision) { this.pendingRevision = revision; this.pendingCommandId = crypto.randomUUID(); }
+    const generation = this.generation;
+    this.busy.set(true); this.error.set('');
+    this.http.post<SettingsEnvelope | { nodeId: string; operation: SettingsOperation }>(this.base() + '/apply',
+      { expectedRevision: revision, targetRevision: revision, commandId: this.pendingCommandId },
+      { headers: this.headers(), params: this.params() }).subscribe({
+        next: value => {
+          if (generation !== this.generation) return;
+          this.busy.set(false);
+          if (this.validEnvelope(value)) this.accept(value);
+          else { this.read(); this.startPolling(); }
+        },
+        error: failure => {
+          if (generation !== this.generation) return;
+          this.busy.set(false);
+          this.error.set(failure.status === 0 || failure.status >= 500
+            ? 'Ответ о применении не получен. Проверяем состояние ноды; повтор использует ту же команду.'
+            : this.failureLabel(failure));
+          this.read(true); this.startPolling();
+        }
+      });
   }
   checkMcp(server: McpServer): void {
-    if (this.checkingId()) return; this.checkingId.set(server.id);
+    if (this.checkingId() || this.hasUnsavedChanges()) return; this.checkingId.set(server.id);
     this.http.post<{ state?: string; reasonCode?: string; toolsCount?: number }>(this.base() + '/mcp-checks',
       { expectedRevision: this.envelope()?.draftRevision, mcpServerId: server.id }, { headers: this.headers(), params: this.params() }).subscribe({
-      next: value => { this.checkingId.set(''); const suffix = value.toolsCount === undefined ? '' : ` · инструментов: ${value.toolsCount}`; this.checkResults.update(all => ({ ...all, [server.id]: `${value.state || 'Проверено'}${suffix}` })); },
+      next: value => { this.checkingId.set(''); const suffix = value.toolsCount === undefined ? '' : ` · инструментов: ${value.toolsCount}`; const reason = value.reasonCode ? ` · ${value.reasonCode}` : ''; this.checkResults.update(all => ({ ...all, [server.id]: `${value.state || 'Проверено'}${suffix}${reason}` })); },
       error: failure => { this.checkingId.set(''); this.checkResults.update(all => ({ ...all, [server.id]: this.failureLabel(failure) })); }
     });
   }
@@ -200,32 +242,38 @@ export class NodeSettingsComponent implements OnChanges, OnDestroy {
   selectedModel(): ModelChoice | undefined { const id = this.draft()?.inference.modelId; return id ? this.catalog()?.models.find(x => x.id === id) : undefined; }
   hasUnsavedChanges(): boolean { return !!this.draft() && JSON.stringify(this.draft()) !== this.savedDraft; }
   applyUnsupported(): boolean { return this.envelope()?.capabilities?.['nativeRestart'] === 'unsupported'; }
-  settingsApplied(): boolean { const value = this.envelope(); return !!value?.applied && value.draftRevision === value.appliedRevision && !this.hasUnsavedChanges(); }
-  settingsStatus(): string { return this.hasUnsavedChanges() ? 'Не сохранено' : this.settingsApplied() ? 'Применено' : this.envelope()?.draftRevision === 0 ? 'Исходные настройки' : 'Есть черновик'; }
+  operationInFlight(): boolean { return ['pending', 'queued', 'running'].includes(this.envelope()?.operation?.status || ''); }
+  settingsApplied(): boolean { const value = this.envelope(); return !!value?.applied && value.draftRevision === value.appliedRevision && !this.hasUnsavedChanges() && value.operation?.status !== 'failed'; }
+  settingsStatus(): string { return this.operationInFlight() ? 'Применяется' : this.hasUnsavedChanges() ? 'Не применено' : this.settingsApplied() ? 'Применено' : this.envelope()?.draftRevision === 0 ? 'Исходные настройки' : 'Не применено'; }
   settingsGuidance(): string {
-    if (this.hasUnsavedChanges()) return 'Есть несохранённые изменения. Нажмите «Сохранить черновик». Работающая модель пока не изменена.';
-    if (this.settingsApplied()) return 'Сохранённые настройки применены к ноде.';
-    if (this.envelope()?.draftRevision === 0) return 'Настройки через Web ещё не применялись. Выбор в форме не меняет работающую модель.';
-    return this.applyUnsupported() ? 'Черновик сохранён, но не применён к ноде.' : 'Черновик сохранён. Нажмите «Применить ревизию» и подтвердите изменение.';
+    if (this.operationInFlight()) return 'Нода ожидает завершения текущей работы или применяет настройки. Новые сообщения остаются в очереди.';
+    if (this.envelope()?.operation?.status === 'failed') return 'Изменения не применены. Работающие значения сохранены, если откат завершился успешно.';
+    if (this.hasUnsavedChanges()) return 'Есть изменения. Работающие значения пока не изменились.';
+    if (this.settingsApplied()) return 'Эти настройки работают во всех диалогах ноды.';
+    if (this.envelope()?.draftRevision === 0) return 'Настройки через Web ещё не применялись.';
+    return 'Сохранённые значения отличаются от работающих. Нажмите «Применить изменения».';
   }
+  appliedMcpNames(value: SettingsSnapshot): string { return value.mcpServers.filter(server => server.enabled).map(server => server.name).join(', ') || 'нет'; }
   catalogLabel(): string { return ({ fresh: 'Каталог актуален', stale: 'Каталог устарел', unavailable: 'Каталог недоступен', unsupported: 'Каталог не поддерживается' } as Record<string,string>)[this.catalog()?.state || 'unavailable']; }
   catalogClass(): string { return this.catalog()?.state === 'fresh' ? 'ready' : this.catalog()?.state === 'stale' ? 'unknown' : 'attention'; }
-  operationLabel(value: SettingsOperation): string { return ({ queued: 'В очереди', running: 'Выполняется', succeeded: 'Применено', failed: 'Не применено', cancelled: 'Отменено' } as Record<string,string>)[value.status] || value.status; }
+  operationLabel(value: SettingsOperation): string { return ({ pending: 'Ожидает выполнения', queued: 'В очереди', running: 'Выполняется', succeeded: 'Применено', failed: 'Не применено', cancelled: 'Отменено' } as Record<string,string>)[value.status] || value.status; }
+  operationPhaseLabel(value: SettingsOperation): string { return ({ preflight: 'Проверка настроек', draining: 'Ожидание текущей работы', waiting: 'Ожидание текущей работы', restarting: 'Перезапуск агента', stopping: 'Перезапуск агента', verifying: 'Проверка применения', verified: 'Проверка завершена', rollback: 'Восстановление прежних настроек', complete: 'Проверка завершена' } as Record<string,string>)[value.phase] || 'Состояние применения'; }
+  operationReasonLabel(code: string): string {
+    return ({ catalog_unavailable: 'Каталог моделей недоступен.', model_unavailable: 'Модель недоступна для этой ноды.',
+      model_parameter_unsupported: 'Этот параметр не поддерживается моделью.', model_parameters_incompatible: 'Выбранные параметры несовместимы.',
+      parameter_unsupported: 'Этот параметр не поддерживается нодой.', active_attempt_timeout: 'Текущая работа не завершилась за отведённое время.',
+      drain_timeout: 'Текущая работа не завершилась за отведённое время.', native_restart_failed: 'Процесс агента не запустился с новыми настройками.',
+      rollback_failed: 'Не удалось восстановить прежний процесс; нода пока не готова к работе.',
+      apply_interrupted: 'Применение прервалось; состояние ноды требует проверки.', provider_unavailable: 'Агент недоступен для проверки.'
+    } as Record<string,string>)[code] || (/^[a-z0-9_]{1,80}$/.test(code) ? `Ошибка применения: ${code}` : 'Ошибка применения; проверьте состояние ноды.');
+  }
   trackModel = (_: number, value: ModelChoice) => value.id; trackChoice = (_: number, value: CatalogChoice) => value.id; trackMcp = (_: number, value: McpServer) => value.id;
 
-  private mutate(method: 'PUT' | 'POST', suffix: string, payload: unknown): void {
-    const generation = this.generation; this.busy.set(true); this.error.set('');
-    const request = method === 'PUT' ? this.http.put<SettingsEnvelope>(this.base() + suffix, payload, { headers: this.headers(), params: this.params() })
-      : this.http.post<SettingsEnvelope | { nodeId: string; operation: SettingsOperation }>(this.base() + suffix, payload, { headers: this.headers(), params: this.params() });
-    request.subscribe({
-      next: value => {
-        if (generation !== this.generation) return; this.busy.set(false); this.clearSecrets();
-        if (this.validEnvelope(value)) this.accept(value); else { this.read(); this.startPolling(); }
-      },
-      error: failure => { if (generation === this.generation) { this.busy.set(false); this.clearSecrets(); this.error.set(this.failureLabel(failure)); } }
-    });
-  }
   private accept(value: SettingsEnvelope): void {
+    if (this.pendingCommandId && value.operation?.commandId === this.pendingCommandId) {
+      this.error.set('');
+      if (!['pending', 'queued', 'running'].includes(value.operation.status)) { this.pendingCommandId = null; this.pendingRevision = null; }
+    }
     this.clearSecrets(); this.envelope.set(value);
     this.draft.set(structuredClone(value.draft));
     for (const server of this.draft()!.mcpServers) {
@@ -234,7 +282,7 @@ export class NodeSettingsComponent implements OnChanges, OnDestroy {
         : 'remove';
     }
     this.savedDraft = JSON.stringify(this.draft());
-    if (value.operation && ['queued', 'running'].includes(value.operation.status)) this.startPolling();
+    if (this.pendingCommandId || (value.operation && ['pending', 'queued', 'running'].includes(value.operation.status))) this.startPolling();
     else if (this.poll !== undefined) { window.clearInterval(this.poll); this.poll = undefined; }
   }
   private validEnvelope(value: unknown): value is SettingsEnvelope {
@@ -242,14 +290,14 @@ export class NodeSettingsComponent implements OnChanges, OnDestroy {
     return item?.schemaId === 'harness-node-settings-v1' && item.nodeId === this.nodeId && Number.isInteger(item.draftRevision) &&
       Number.isInteger(item.appliedRevision) && Array.isArray(item.draft?.mcpServers) && !!item.draft?.inference;
   }
-  private startPolling(): void { if (this.poll === undefined) this.poll = window.setInterval(() => { if (!document.hidden && !this.loading() && !this.busy() && !this.hasUnsavedChanges()) this.read(); }, 2000); }
+  private startPolling(): void { if (this.poll === undefined) this.poll = window.setInterval(() => { if (!document.hidden && !this.loading() && !this.busy() && !this.hasUnsavedChanges()) this.read(!!this.pendingCommandId); }, 2000); }
   private clearSecrets(): void { for (const server of this.draft()?.mcpServers || []) server.auth.secret = undefined; }
   private failureLabel(failure: HttpErrorResponse): string {
     if (failure.status === 401) return 'Сессия Web истекла. Войдите снова.';
     if (failure.status === 403) return 'Недостаточно прав для управления настройками.';
     if (failure.status === 409 || failure.status === 412) return failure.error?.code === 'connection_changed' ? 'Подключение изменилось. Выберите ноду снова.' : 'Настройки изменились параллельно. Обновите данные.';
     if (failure.status === 413) return 'Настройки превышают допустимый размер.';
-    if (failure.status === 422) return 'Harness отклонила сочетание настроек.';
+    if (failure.status === 422) return typeof failure.error?.code === 'string' ? this.operationReasonLabel(failure.error.code) : 'Harness отклонила сочетание настроек.';
     return 'Не удалось подтвердить результат операции. Обновите состояние.';
   }
 }
