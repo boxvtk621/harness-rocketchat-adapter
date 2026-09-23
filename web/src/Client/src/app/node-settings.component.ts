@@ -83,6 +83,7 @@ interface ModelCatalog {
               <label>URL<input [(ngModel)]="server.url" type="url" autocomplete="url" placeholder="https://mcp.example/sse"></label>
               <div class="settings-grid compact"><label>Таймаут, мс<input [(ngModel)]="server.timeoutMs" type="number" min="100" max="120000"></label><label>Авторизация
                 <select [(ngModel)]="server.auth.kind" (ngModelChange)="authKindChanged(server)"><option value="none">Без авторизации</option><option value="bearer">Bearer</option></select></label></div>
+              <p *ngIf="mcpTimeoutUnsupported()" class="hint">SDK этой ноды управляет таймаутом MCP самостоятельно. Для включённого сервера оставьте 30000 мс.</p>
               <label *ngIf="server.auth.kind==='bearer'">Bearer‑секрет
                 <select [(ngModel)]="server.auth.secretAction" (ngModelChange)="secretActionChanged(server)"><option *ngIf="server.auth.bearerTokenConfigured" value="keep">Не менять</option><option value="replace">Заменить</option><option *ngIf="server.auth.bearerTokenConfigured" value="remove">Удалить</option></select></label>
               <label *ngIf="server.auth.secretAction==='replace'">Новый секрет<input [(ngModel)]="server.auth.secret" type="password" maxlength="16384" autocomplete="new-password" spellcheck="false"></label>
@@ -92,10 +93,11 @@ interface ModelCatalog {
           </div>
           <ng-template #noMcp><p class="hint">MCP‑серверы не добавлены.</p></ng-template>
           <button type="button" (click)="addMcp()">Добавить MCP</button>
+          <p class="hint">«Проверить» отдельно проверяет соединение и список инструментов. Работающие настройки агента показаны выше.</p>
         </fieldset>
 
         <div class="actions settings-actions">
-          <button data-testid="settings-apply" class="primary" type="button" (click)="confirmApply.set(true)" [disabled]="busy() || operationInFlight() || applyUnsupported() || modelRequired() || incompatibleChoice('speed') || incompatibleChoice('reasoning') || (!hasUnsavedChanges() && value.draftRevision===value.appliedRevision)">{{ busy() ? 'Применяем…' : 'Применить изменения' }}</button>
+          <button data-testid="settings-apply" class="primary" type="button" (click)="confirmApply.set(true)" [disabled]="busy() || operationInFlight() || applyUnsupported() || modelRequired() || incompatibleChoice('speed') || incompatibleChoice('reasoning') || incompatibleMcpTimeout() || (!hasUnsavedChanges() && value.draftRevision===value.appliedRevision)">{{ busy() ? 'Применяем…' : 'Применить изменения' }}</button>
         </div>
         <div *ngIf="confirmApply()" class="apply-confirm" role="group" aria-label="Подтверждение применения настроек">
           <strong>Применить изменения ко всем диалогам ноды?</strong>
@@ -173,7 +175,7 @@ export class NodeSettingsComponent implements OnChanges, OnDestroy {
     });
   }
   apply(): void {
-    const current = this.envelope(); if (!current || this.busy() || this.operationInFlight() || this.applyUnsupported() || this.modelRequired() || this.incompatibleChoice('speed') || this.incompatibleChoice('reasoning')) return;
+    const current = this.envelope(); if (!current || this.busy() || this.operationInFlight() || this.applyUnsupported() || this.modelRequired() || this.incompatibleChoice('speed') || this.incompatibleChoice('reasoning') || this.incompatibleMcpTimeout()) return;
     this.confirmApply.set(false);
     if (this.hasUnsavedChanges()) {
       const settings = this.draft(); if (!settings) return;
@@ -223,7 +225,7 @@ export class NodeSettingsComponent implements OnChanges, OnDestroy {
     if (this.checkingId() || this.hasUnsavedChanges()) return; this.checkingId.set(server.id);
     this.http.post<{ state?: string; reasonCode?: string; toolsCount?: number }>(this.base() + '/mcp-checks',
       { expectedRevision: this.envelope()?.draftRevision, mcpServerId: server.id }, { headers: this.headers(), params: this.params() }).subscribe({
-      next: value => { this.checkingId.set(''); const suffix = value.toolsCount === undefined ? '' : ` · инструментов: ${value.toolsCount}`; const reason = value.reasonCode && /^[a-z0-9_]{1,80}$/.test(value.reasonCode) ? ` · ${value.reasonCode}` : ''; this.checkResults.update(all => ({ ...all, [server.id]: `${value.state || 'Проверено'}${suffix}${reason}` })); },
+      next: value => { this.checkingId.set(''); const suffix = value.toolsCount === undefined ? '' : ` · инструментов: ${value.toolsCount}`; const reason = value.reasonCode && /^[a-z0-9_]{1,80}$/.test(value.reasonCode) ? ` · ${value.reasonCode}` : ''; const state = ({ connected: 'Соединение доступно', available: 'Соединение доступно', unavailable: 'Сервер недоступен', unsupported: 'Проверка не поддерживается' } as Record<string,string>)[value.state || ''] || 'Проверено'; this.checkResults.update(all => ({ ...all, [server.id]: `${state}${suffix}${reason}` })); },
       error: failure => { this.checkingId.set(''); this.checkResults.update(all => ({ ...all, [server.id]: this.failureLabel(failure) })); }
     });
   }
@@ -249,6 +251,8 @@ export class NodeSettingsComponent implements OnChanges, OnDestroy {
   }
   hasUnsavedChanges(): boolean { return !!this.draft() && JSON.stringify(this.draft()) !== this.savedDraft; }
   applyUnsupported(): boolean { return !['supported', 'managed'].includes(String(this.envelope()?.capabilities?.['nativeRestart'] || '')); }
+  mcpTimeoutUnsupported(): boolean { return this.envelope()?.capabilities?.['mcpTimeout'] === 'unsupported'; }
+  incompatibleMcpTimeout(): boolean { return this.mcpTimeoutUnsupported() && !!this.draft()?.mcpServers.some(server => server.enabled && server.timeoutMs !== 30000); }
   modelDefaultSupported(): boolean { return this.envelope()?.capabilities?.['modelDefault'] === 'supported'; }
   modelRequired(): boolean { return this.draft()?.inference.modelId === null && !this.modelDefaultSupported(); }
   operationInFlight(): boolean { return ['pending', 'queued', 'running'].includes(this.envelope()?.operation?.status || ''); }
