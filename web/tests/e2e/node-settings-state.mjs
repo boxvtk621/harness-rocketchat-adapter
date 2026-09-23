@@ -55,6 +55,15 @@ assert.equal(calls.at(-2).body.commandId,firstCommand,'Retry preserves commandId
 assert.equal(calls.at(-1).method,'GET','Uncertain response triggers readback');
 assert.equal(calls.filter(x=>x.method==='PUT').length,1,'Retry does not save a second draft');
 assert.match(active.error(),/Ответ о применении не получен/,'Unconfirmed result stays visible until readback finds the command');
+const compatibility=new NodeSettingsComponent({});
+compatibility.nodeId='node';compatibility.accept({...structuredClone(saved),capabilities:{nativeRestart:'supported'}});
+compatibility.catalog.set({models:[{id:'new-model',speedModes:[{id:'standard'}],reasoningEfforts:[{id:'low'}]}]});
+compatibility.draft().inference={modelId:'new-model',speedMode:'fast',reasoningEffort:'high'};
+assert.equal(compatibility.incompatibleChoice('speed'),true,'Changing model does not silently replace speed');
+assert.equal(compatibility.incompatibleChoice('reasoning'),true,'Changing model does not silently replace reasoning');
+compatibility.apply();assert.equal(compatibility.busy(),false,'Incompatible values require an explicit selection');
+compatibility.draft().inference.speedMode=null;compatibility.draft().inference.reasoningEffort=null;
+assert.equal(compatibility.incompatibleChoice('speed'),false);
 const auth=new ProviderAuthComponent({});auth.sessionKey='user:session';auth.snapshot.set({state:'authenticated'});auth.secret='not-a-real-secret';
 auth.ngOnChanges({accessToken:{firstChange:false}});
 assert.equal(auth.snapshot().state,'authenticated');assert.equal(auth.secret,'not-a-real-secret');

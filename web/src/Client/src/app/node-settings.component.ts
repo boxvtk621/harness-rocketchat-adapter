@@ -42,21 +42,23 @@ interface ModelCatalog {
           <legend>Модель</legend>
           <div class="settings-grid">
             <label>Модель
-              <select data-testid="node-model" [(ngModel)]="settings.inference.modelId" (ngModelChange)="modelChanged()">
+              <select data-testid="node-model" [(ngModel)]="settings.inference.modelId">
                 <option [ngValue]="null">По умолчанию провайдера</option>
                 <option *ngIf="settings.inference.modelId && !selectedModel()" [value]="settings.inference.modelId">{{ settings.inference.modelId }} (из настроек)</option>
                 <option *ngFor="let model of catalog()?.models || []; trackBy: trackModel" [value]="model.id">{{ model.displayName || model.id }}</option>
               </select>
             </label>
             <label>Режим скорости
-              <select data-testid="node-speed" [(ngModel)]="settings.inference.speedMode" [disabled]="!selectedModel()?.speedModes?.length">
+              <select data-testid="node-speed" [(ngModel)]="settings.inference.speedMode" [disabled]="!selectedModel()?.speedModes?.length && !settings.inference.speedMode">
                 <option [ngValue]="null">По умолчанию провайдера</option>
+                <option *ngIf="incompatibleChoice('speed')" [value]="settings.inference.speedMode">{{ settings.inference.speedMode }} (недоступен для выбранной модели)</option>
                 <option *ngFor="let item of selectedModel()?.speedModes || []; trackBy: trackChoice" [value]="item.id">{{ item.id }}</option>
               </select>
             </label>
             <label>Глубина рассуждений
-              <select data-testid="node-reasoning" [(ngModel)]="settings.inference.reasoningEffort" [disabled]="!selectedModel()?.reasoningEfforts?.length">
+              <select data-testid="node-reasoning" [(ngModel)]="settings.inference.reasoningEffort" [disabled]="!selectedModel()?.reasoningEfforts?.length && !settings.inference.reasoningEffort">
                 <option [ngValue]="null">По умолчанию провайдера</option>
+                <option *ngIf="incompatibleChoice('reasoning')" [value]="settings.inference.reasoningEffort">{{ settings.inference.reasoningEffort }} (недоступен для выбранной модели)</option>
                 <option *ngFor="let item of selectedModel()?.reasoningEfforts || []; trackBy: trackChoice" [value]="item.id">{{ item.id }}</option>
               </select>
             </label>
@@ -67,6 +69,7 @@ interface ModelCatalog {
             <button *ngIf="catalog()?.nextCursor" type="button" (click)="loadCatalog(false)" [disabled]="catalogLoading()">Ещё модели</button>
           </div>
           <p class="hint">Список и допустимые сочетания сообщает текущая Harness под её авторизацией. Режим скорости не заменяет глубину рассуждений.</p>
+          <p *ngIf="incompatibleChoice('speed') || incompatibleChoice('reasoning')" class="hint" role="alert">Прежнее значение недоступно для выбранной модели. Выберите поддерживаемое значение или режим провайдера по умолчанию.</p>
         </fieldset>
 
         <fieldset class="settings-fieldset" *ngIf="draft() as settings" [disabled]="busy()">
@@ -90,7 +93,7 @@ interface ModelCatalog {
         </fieldset>
 
         <div class="actions settings-actions">
-          <button data-testid="settings-apply" class="primary" type="button" (click)="confirmApply.set(true)" [disabled]="busy() || operationInFlight() || applyUnsupported() || (!hasUnsavedChanges() && value.draftRevision===value.appliedRevision)">{{ busy() ? 'Применяем…' : 'Применить изменения' }}</button>
+          <button data-testid="settings-apply" class="primary" type="button" (click)="confirmApply.set(true)" [disabled]="busy() || operationInFlight() || applyUnsupported() || incompatibleChoice('speed') || incompatibleChoice('reasoning') || (!hasUnsavedChanges() && value.draftRevision===value.appliedRevision)">{{ busy() ? 'Применяем…' : 'Применить изменения' }}</button>
         </div>
         <div *ngIf="confirmApply()" class="apply-confirm" role="group" aria-label="Подтверждение применения настроек">
           <strong>Применить изменения ко всем диалогам ноды?</strong>
@@ -168,7 +171,7 @@ export class NodeSettingsComponent implements OnChanges, OnDestroy {
     });
   }
   apply(): void {
-    const current = this.envelope(); if (!current || this.busy() || this.operationInFlight() || this.applyUnsupported()) return;
+    const current = this.envelope(); if (!current || this.busy() || this.operationInFlight() || this.applyUnsupported() || this.incompatibleChoice('speed') || this.incompatibleChoice('reasoning')) return;
     this.confirmApply.set(false);
     if (this.hasUnsavedChanges()) {
       const settings = this.draft(); if (!settings) return;
@@ -233,13 +236,15 @@ export class NodeSettingsComponent implements OnChanges, OnDestroy {
     server.auth.secret = undefined;
     server.auth.secretAction = server.auth.kind === 'bearer' ? (server.auth.bearerTokenConfigured ? 'keep' : 'replace') : 'remove';
   }
-  modelChanged(): void {
-    const settings = this.draft(); const model = this.selectedModel(); if (!settings) return;
-    if (!model) { settings.inference.speedMode = null; settings.inference.reasoningEffort = null; return; }
-    if (!model.speedModes.some(x => x.id === settings.inference.speedMode)) settings.inference.speedMode = null;
-    if (!model.reasoningEfforts.some(x => x.id === settings.inference.reasoningEffort)) settings.inference.reasoningEffort = null;
-  }
   selectedModel(): ModelChoice | undefined { const id = this.draft()?.inference.modelId; return id ? this.catalog()?.models.find(x => x.id === id) : undefined; }
+  incompatibleChoice(kind: 'speed' | 'reasoning'): boolean {
+    const model = this.selectedModel(); const inference = this.draft()?.inference;
+    if (!inference) return false;
+    const selected = kind === 'speed' ? inference.speedMode : inference.reasoningEffort;
+    if (!model) return inference.modelId === null && !!selected;
+    const choices = kind === 'speed' ? model.speedModes : model.reasoningEfforts;
+    return !!selected && !choices.some(choice => choice.id === selected);
+  }
   hasUnsavedChanges(): boolean { return !!this.draft() && JSON.stringify(this.draft()) !== this.savedDraft; }
   applyUnsupported(): boolean { return this.envelope()?.capabilities?.['nativeRestart'] === 'unsupported'; }
   operationInFlight(): boolean { return ['pending', 'queued', 'running'].includes(this.envelope()?.operation?.status || ''); }
