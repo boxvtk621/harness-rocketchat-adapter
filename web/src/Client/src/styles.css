@@ -165,8 +165,10 @@ tbody tr:not(.group-row):hover, tbody tr.selected { background: var(--selected);
 .provider-auth .provider-auth-head .status { flex: 0 0 auto; }
 .provider-auth .provider-auth-entry { display: grid; gap: var(--space-2); margin-top: var(--space-3); }
 .provider-auth .provider-auth-entry form { gap: var(--space-2); padding: 0; }
-.provider-auth .provider-auth-primary { justify-self: start; }
-.provider-auth .actions { flex-wrap: wrap; }
+.provider-auth-actions { margin-top: var(--space-3); align-items: center; flex-wrap: nowrap; }
+.provider-auth-actions button { flex: 0 0 auto; padding-inline: 10px; white-space: nowrap; }
+.provider-auth-actions .provider-auth-logout { margin-left: auto; border-color: #d8aeb2; color: var(--danger); }
+.provider-auth-actions .provider-auth-logout:hover { border-color: #c77f86; background: var(--danger-bg); }
 .provider-auth a { overflow-wrap: anywhere; }
 .device-code { display: inline-block; padding: 6px 10px; border: 1px solid var(--line); font-size: 1.15rem; letter-spacing: .12em; user-select: all; }
 .banner.compact { margin: var(--space-3) 0; }

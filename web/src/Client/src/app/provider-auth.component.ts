@@ -55,18 +55,18 @@ export function providerAuthStateClass(value: string): string {
             </div>
           </ng-container>
           <p *ngIf="!auth.capabilities.methods.length" class="hint">Управляемый вход не поддерживается этой нодой.</p>
-          <div class="provider-auth-entry" *ngIf="auth.operation?.status!=='pending' && !uncertain()">
-            <form *ngIf="auth.capabilities.methods.includes('secret')" (ngSubmit)="start('secret')" autocomplete="off">
+          <div class="provider-auth-entry" *ngIf="auth.operation?.status!=='pending' && !uncertain() && auth.capabilities.methods.includes('secret')">
+            <form (ngSubmit)="start('secret')" autocomplete="off">
               <label>Секрет провайдера<input data-testid="provider-secret" type="password" name="providerSecret" [(ngModel)]="secret" autocomplete="new-password" maxlength="16384" spellcheck="false" [disabled]="busy()"></label>
               <p class="hint">Текущее значение не отображается. Пустое поле его не изменяет.</p>
               <button data-testid="provider-start-secret" type="submit" [disabled]="busy() || !secret.trim()">{{ auth.state==='authenticated' ? 'Заменить секрет' : 'Авторизовать' }}</button>
             </form>
-            <button *ngIf="auth.capabilities.methods.includes('device_code')" class="provider-auth-primary" data-testid="provider-start-device" type="button" (click)="start('device_code')" [disabled]="busy()">{{ auth.state==='authenticated' ? 'Повторить вход' : 'Авторизовать' }}</button>
           </div>
-          <div class="actions">
+          <div class="actions provider-auth-actions">
+            <button *ngIf="auth.operation?.status!=='pending' && !uncertain() && auth.capabilities.methods.includes('device_code')" class="primary provider-auth-primary" data-testid="provider-start-device" type="button" (click)="start('device_code')" [disabled]="busy()">{{ auth.state==='authenticated' ? 'Повторить вход' : 'Авторизовать' }}</button>
             <button *ngIf="auth.capabilities.canCheck" data-testid="provider-check" type="button" (click)="command('check')" [disabled]="busy() || uncertain()">Проверить</button>
             <button *ngIf="auth.operation?.status==='pending'" data-testid="provider-cancel" type="button" (click)="command('operations/' + auth.operation!.operationId + '/cancel')" [disabled]="busy()">Отменить вход</button>
-            <button *ngIf="auth.capabilities.canLogout && auth.state!=='unauthenticated' && auth.operation?.status!=='pending'" data-testid="provider-logout" type="button" (click)="confirmLogout.set(true)" [disabled]="busy()">Выйти</button>
+            <button *ngIf="auth.capabilities.canLogout && auth.state!=='unauthenticated' && auth.operation?.status!=='pending'" class="provider-auth-logout" data-testid="provider-logout" type="button" (click)="confirmLogout.set(true)" [disabled]="busy()">Выйти</button>
           </div>
           <div *ngIf="confirmLogout()" role="group" aria-label="Подтверждение выхода">
             <p>Удалить вход у провайдера на этой ноде? Приём новой работы будет закрыт.</p>
