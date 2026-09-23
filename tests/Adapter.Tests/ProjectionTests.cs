@@ -59,6 +59,34 @@ public class ProjectionTests
     }
 
     [Fact]
+    public async Task History_reads_all_request_pages_and_deduplicates_overlapping_requests()
+    {
+        var requestPages = 0;
+        var client = new ProjectionClient((path, query) =>
+        {
+            if (path[^1] == "requests")
+            {
+                requestPages++;
+                return query!["cursor"] is null
+                    ? Page([Request(1, "completed", TerminalDialog)], "more", "requests")
+                    : Page([Request(1, "completed", TerminalDialog), Request(2, "completed", TerminalDialog)], null, "requests");
+            }
+            if (path[^1] == "dialogs") return Page([Dialog(TerminalDialog)], null, "dialogs");
+            if (path[^1] == "attempts")
+            {
+                var id = path[^2] == RequestId(1) ? 1 : 2;
+                return Page([Attempt(id, id, TerminalDialog)], null, "attempts", TerminalDialog, RequestId(id));
+            }
+            return Page([UserInput(1, 1), Message(1, 2, 1, 1), UserInput(2, 3), Message(2, 4, 2, 2)], null, "history", TerminalDialog);
+        });
+
+        var result = await HarnessProjectionReader.ReadHistoryAsync([Connection()], client, default);
+
+        Assert.Equal(2, requestPages);
+        Assert.Equal(new[] { RequestId(1), RequestId(2) }, result.Select(x => x.RequestId));
+    }
+
+    [Fact]
     public async Task History_retains_distinct_terminal_requests_in_one_dialog_without_fake_completion_time()
     {
         var client = new ProjectionClient((path, _) => path[^1] switch

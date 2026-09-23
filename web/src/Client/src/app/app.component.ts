@@ -526,6 +526,13 @@ export class AppComponent implements OnInit, OnDestroy {
         result: dialog.result ?? null,
         messages: dialog.messages
       }];
+    }).sort((left, right) => {
+      // The card displays completedAt. Missing times belong after dated requests.
+      const leftTime = Date.parse(left.completedAt ?? '');
+      const rightTime = Date.parse(right.completedAt ?? '');
+      const order = (Number.isFinite(rightTime) ? rightTime : -Infinity)
+        - (Number.isFinite(leftTime) ? leftTime : -Infinity);
+      return order || (left.key < right.key ? -1 : left.key > right.key ? 1 : 0);
     });
   }
 
