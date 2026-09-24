@@ -27,59 +27,76 @@
 </section>
 
 <div *ngIf="popup() as kind" class="settings-modal-backdrop" (click)="closePopup()">
-  <section class="settings-modal" role="dialog" aria-modal="true" [attr.aria-labelledby]="kind === 'agent' ? 'agent-popup-title' : 'mcp-popup-title'"
+  <section class="settings-modal" [class.settings-modal-agent]="kind === 'agent'" role="dialog" aria-modal="true" [attr.aria-labelledby]="kind === 'agent' ? 'agent-popup-title' : 'mcp-popup-title'"
     data-testid="settings-popup" tabindex="-1" (click)="$event.stopPropagation()" (keydown)="onPopupKeydown($event)">
     <div class="settings-modal-head">
       <div>
         <p class="inspector-kicker">{{ displayName || connectionId }}</p>
         <h2 *ngIf="kind==='agent'" id="agent-popup-title">Параметры агента</h2>
         <h2 *ngIf="kind==='mcp'" id="mcp-popup-title">MCP JSON</h2>
+        <p *ngIf="kind==='agent'" class="settings-modal-subtitle">Модель и режимы для диалогов этой ноды</p>
       </div>
       <button type="button" data-popup-first data-testid="close-settings-popup" aria-label="Закрыть настройки" (click)="closePopup()">×</button>
     </div>
     <p *ngIf="error()" class="settings-error" role="alert">{{ error() }}</p>
     <ng-container *ngIf="draft() as settings">
-      <div *ngIf="kind==='agent'" class="settings-modal-body">
-        <label>Модель
-          <select data-testid="node-model" [(ngModel)]="settings.inference.modelId" [disabled]="!catalogFresh() || busy()">
+      <div *ngIf="kind==='agent'" class="settings-modal-body agent-settings-body">
+        <div class="agent-model-field">
+          <div class="agent-field-heading">
+            <div><label for="node-model-select">Модель</label><p>Определяет доступные режимы ответа</p></div>
+            <span class="agent-field-index" aria-hidden="true">01 / 03</span>
+          </div>
+          <select id="node-model-select" data-testid="node-model" [(ngModel)]="settings.inference.modelId" [disabled]="!catalogFresh() || busy()">
             <option *ngIf="modelDefaultSupported()" [ngValue]="null">Модель ноды по умолчанию</option>
             <option *ngIf="settings.inference.modelId && !selectedModel()" [value]="settings.inference.modelId">{{ settings.inference.modelId }} (сохранено)</option>
             <option *ngFor="let model of catalog()?.models || []; trackBy: trackModel" [value]="model.id">{{ model.displayName || model.id }}</option>
           </select>
-        </label>
-        <div class="catalog-line">
-          <span [class]="'status ' + (catalogFresh() ? 'ready' : 'attention')">{{ catalogLabel() }}</span>
-          <button type="button" (click)="loadCatalog(true)" [disabled]="catalogLoading()">Обновить каталог</button>
-          <button *ngIf="catalog()?.nextCursor" type="button" (click)="loadCatalog(false)" [disabled]="catalogLoading()">Ещё модели</button>
+          <div class="agent-catalog-line">
+            <span [class]="'status ' + (catalogFresh() ? 'ready' : 'attention')">{{ catalogLabel() }}</span>
+            <div class="agent-catalog-actions">
+              <button type="button" (click)="loadCatalog(true)" [disabled]="catalogLoading()">Обновить каталог</button>
+              <button *ngIf="catalog()?.nextCursor" type="button" (click)="loadCatalog(false)" [disabled]="catalogLoading()">Ещё модели</button>
+            </div>
+          </div>
+          <p *ngIf="modelRequired()" class="hint" role="alert">Для этой ноды необходимо выбрать модель.</p>
         </div>
-        <p *ngIf="modelRequired()" class="hint" role="alert">Для этой ноды необходимо выбрать модель.</p>
-        <div class="settings-mode">
-          <strong>Ускорение</strong>
-          <ng-container *ngIf="settings.inference.speedMode !== null; else inheritedSpeed">
-            <label class="toggle"><input data-testid="node-speed" type="checkbox" role="switch" [checked]="settings.inference.speedMode==='on'" (change)="setSpeed($any($event.target).checked)" [disabled]="!speedSupported() || busy()"> {{ settings.inference.speedMode==='on' ? 'Включено' : 'Выключено' }}</label>
-            <button *ngIf="speedDefaultSupported()" type="button" (click)="resetSpeed()" [disabled]="busy()">Использовать настройку модели</button>
-          </ng-container>
-          <ng-template #inheritedSpeed>
-            <span class="hint">Используется настройка модели; фактическое значение не подтверждено.</span>
-            <button type="button" (click)="startSpeed()" [disabled]="!speedSupported() || busy()">Задать вручную</button>
-          </ng-template>
+        <div class="agent-mode-heading"><span>Режимы ответа</span><span aria-hidden="true">02—03</span></div>
+        <div class="agent-control-list">
+          <fieldset class="agent-control">
+            <legend class="sr-only">Скорость</legend>
+            <div class="agent-control-copy"><h3>Скорость</h3><p>Приоритет обработки ответа</p></div>
+            <div class="agent-options" data-testid="node-speed-options">
+              <label class="agent-option" *ngIf="speedDefaultSupported() || settings.inference.speedMode === null">
+                <input type="radio" name="node-speed-mode" [checked]="settings.inference.speedMode === null" (change)="resetSpeed()" [disabled]="!speedDefaultSupported() || busy()">
+                <span>По умолчанию</span>
+              </label>
+              <label class="agent-option">
+                <input type="radio" name="node-speed-mode" [checked]="settings.inference.speedMode === 'off'" (change)="setSpeed(false)" [disabled]="!speedOptionSupported('off') || busy()">
+                <span>Обычная</span>
+              </label>
+              <label class="agent-option">
+                <input data-testid="node-speed" type="radio" name="node-speed-mode" [checked]="settings.inference.speedMode === 'on'" (change)="setSpeed(true)" [disabled]="!speedOptionSupported('on') || busy()">
+                <span>Быстрая</span>
+              </label>
+            </div>
+          </fieldset>
+          <fieldset class="agent-control">
+            <legend class="sr-only">Глубина рассуждений</legend>
+            <div class="agent-control-copy"><h3>Глубина рассуждений</h3><p>Уровень для выбранной модели</p></div>
+            <div class="agent-options agent-reasoning-options" data-testid="node-reasoning-options">
+              <label class="agent-option" *ngIf="reasoningDefaultSupported() || settings.inference.reasoningEffort === null">
+                <input type="radio" name="node-reasoning-mode" [checked]="settings.inference.reasoningEffort === null" (change)="resetReasoning()" [disabled]="!reasoningDefaultSupported() || busy()">
+                <span>По умолчанию</span>
+              </label>
+              <label class="agent-option" *ngFor="let choice of selectedModel()?.reasoningEfforts || []">
+                <input data-testid="node-reasoning" type="radio" name="node-reasoning-mode" [value]="choice.id" [checked]="settings.inference.reasoningEffort === choice.id" (change)="setReasoning(choice.id)" [disabled]="!reasoningSupported() || busy()">
+                <span>{{ reasoningLabel(choice.id) }}</span>
+              </label>
+              <p *ngIf="!selectedModel()?.reasoningEfforts?.length" class="agent-options-empty">Уровни появятся после обновления каталога.</p>
+            </div>
+          </fieldset>
         </div>
-        <div class="settings-mode">
-          <strong>Глубина рассуждений</strong>
-          <ng-container *ngIf="settings.inference.reasoningEffort !== null; else inheritedReasoning">
-            <label>{{ settings.inference.reasoningEffort }}
-              <input data-testid="node-reasoning" type="range" min="0" step="1" [max]="(selectedModel()?.reasoningEfforts?.length || 1)-1"
-                [value]="reasoningIndex()" [attr.aria-valuetext]="settings.inference.reasoningEffort"
-                (input)="setReasoningIndex($any($event.target).value)" [disabled]="!reasoningSupported() || busy()">
-            </label>
-            <button *ngIf="reasoningDefaultSupported()" type="button" (click)="resetReasoning()" [disabled]="busy()">Использовать настройку модели</button>
-          </ng-container>
-          <ng-template #inheritedReasoning>
-            <span class="hint">Используется настройка модели; фактический уровень не подтверждён.</span>
-            <button type="button" (click)="startReasoning()" [disabled]="!reasoningSupported() || busy()">Выбрать уровень</button>
-          </ng-template>
-        </div>
-        <p *ngIf="incompatibleChoice('speed') || incompatibleChoice('reasoning') || incompatibleTuple()" class="hint" role="alert">Выбранное сочетание не подтверждено каталогом этой модели.</p>
+        <p *ngIf="incompatibleChoice('speed') || incompatibleChoice('reasoning') || incompatibleTuple()" class="agent-compatibility-warning" role="alert">Выбранное сочетание не подтверждено каталогом этой модели.</p>
       </div>
       <div *ngIf="kind==='mcp'" class="settings-modal-body">
         <p class="hint">Редактируйте документ, который поддерживает эта Harness. Секреты на чтении скрыты: keep сохраняет прежний слот, replace требует secret, remove удаляет его.</p>

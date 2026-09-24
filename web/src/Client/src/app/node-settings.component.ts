@@ -222,29 +222,26 @@ export class NodeSettingsComponent implements OnChanges, OnDestroy {
   catalogLabel(): string {
     return ({ fresh: 'Каталог актуален', stale: 'Каталог устарел', unavailable: 'Каталог недоступен', unsupported: 'Каталог не поддерживается' } as Record<string, string>)[this.catalog()?.state || 'unavailable'];
   }
-  speedSupported(): boolean { return this.catalogFresh() && !!this.selectedModel()?.speedModes.length; }
+  speedOptionSupported(mode: 'on' | 'off'): boolean {
+    return this.catalogFresh() && !!this.selectedModel()?.speedModes.some(choice => choice.id === mode);
+  }
   reasoningSupported(): boolean { return this.catalogFresh() && !!this.selectedModel()?.reasoningEfforts.length; }
   setSpeed(enabled: boolean): void {
     const mode = enabled ? 'on' : 'off';
     const draft = this.draft();
-    if (draft && this.selectedModel()?.speedModes.some(choice => choice.id === mode)) draft.inference.speedMode = mode;
-  }
-  startSpeed(): void {
-    const choice = this.selectedModel()?.speedModes.find(item => item.isDefault) || this.selectedModel()?.speedModes[0];
-    if (choice) this.setSpeed(choice.id === 'on');
+    if (draft && this.speedOptionSupported(mode)) draft.inference.speedMode = mode;
   }
   resetSpeed(): void { const draft = this.draft(); if (draft) draft.inference.speedMode = null; }
-  startReasoning(): void {
-    const draft = this.draft();
-    const choices = this.selectedModel()?.reasoningEfforts || [];
-    if (draft && choices.length) draft.inference.reasoningEffort = choices.find(item => item.isDefault)?.id || choices[0].id;
-  }
   resetReasoning(): void { const draft = this.draft(); if (draft) draft.inference.reasoningEffort = null; }
-  reasoningIndex(): number { return Math.max(0, this.selectedModel()?.reasoningEfforts.findIndex(item => item.id === this.draft()?.inference.reasoningEffort) ?? 0); }
-  setReasoningIndex(value: string): void {
-    const selected = this.selectedModel()?.reasoningEfforts[Number(value)];
+  setReasoning(value: string): void {
     const draft = this.draft();
-    if (draft && selected) draft.inference.reasoningEffort = selected.id;
+    if (draft && this.reasoningSupported() && this.selectedModel()?.reasoningEfforts.some(choice => choice.id === value)) {
+      draft.inference.reasoningEffort = value;
+    }
+  }
+  reasoningLabel(value: string): string {
+    return ({ none: 'Без рассуждений', minimal: 'Минимальная', low: 'Низкая', medium: 'Средняя',
+      high: 'Высокая', xhigh: 'Сверхвысокая', max: 'Максимальная', ultra: 'Ультра' } as Record<string, string>)[value] || value;
   }
   incompatibleChoice(kind: 'speed' | 'reasoning'): boolean {
     const selected = kind === 'speed' ? this.draft()?.inference.speedMode : this.draft()?.inference.reasoningEffort;

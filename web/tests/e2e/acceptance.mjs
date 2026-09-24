@@ -813,7 +813,23 @@ async function controlledUiSuite(browser) {
   await page.getByTestId('open-agent-settings').click();
   const popup = page.getByTestId('settings-popup');
   await popup.waitFor();
-  await page.getByTestId('node-speed').check();
+  const agentSettingsShot = join(outputDir, 'controlled-agent-settings.png');
+  await popup.screenshot({ path: agentSettingsShot });
+  assert.ok((await stat(agentSettingsShot)).size > 10_000, 'Agent settings screenshot must be nonempty.');
+  await page.setViewportSize({ width: 640, height: 360 });
+  const agentBounds = await popup.boundingBox();
+  assert.ok(agentBounds && agentBounds.x >= 0 && agentBounds.x + agentBounds.width <= 640
+    && agentBounds.y >= 0 && agentBounds.y + agentBounds.height <= 360,
+  'Agent settings popup must fit the effective CSS viewport at 200% zoom.');
+  const compactAgentSettingsShot = join(outputDir, 'controlled-agent-settings-640.png');
+  await popup.screenshot({ path: compactAgentSettingsShot });
+  assert.ok((await stat(compactAgentSettingsShot)).size > 10_000, 'Compact agent settings screenshot must be nonempty.');
+  await page.setViewportSize({ width: 390, height: 844 });
+  const mobileAgentSettingsShot = join(outputDir, 'controlled-agent-settings-390.png');
+  await popup.screenshot({ path: mobileAgentSettingsShot });
+  assert.ok((await stat(mobileAgentSettingsShot)).size > 10_000, 'Mobile agent settings screenshot must be nonempty.');
+  await page.setViewportSize({ width: 2560, height: 1440 });
+  await page.getByTestId('node-speed-options').getByText('Быстрая', { exact: true }).click();
   await page.keyboard.press('Escape');
   await popup.getByRole('group', { name: 'Несохранённые изменения' }).waitFor();
   await popup.getByRole('button', { name: 'Продолжить редактирование' }).click();
@@ -867,6 +883,10 @@ async function controlledUiSuite(browser) {
 
 const browser = await chromium.launch({ headless: true, args: ['--host-resolver-rules=MAP localhost host.docker.internal'] });
 try {
+  if (process.env.ACCEPTANCE_CONTROLLED_ONLY === 'true') {
+    await controlledUiSuite(browser);
+    console.log('PASS: controlled browser UI, agent settings interactions and responsive screenshots.');
+  } else {
   const manifest = await loadManifest();
   const anonymous = await browser.newContext();
   const unauthorized = await anonymous.request.get(`${apiBaseUrl}/api/connections`);
@@ -885,6 +905,7 @@ try {
     'Both registered Harness executors must be observed exactly once.', 60_000);
   await assertNativeSettingsContracts(first, manifest);
   await assertCodexModeOnlyApply(first, manifest);
+  await controlledUiSuite(browser);
   await openSection(second, 'work');
   const expected = await ensureHarnessFixtures(first, manifest);
   await assertRealIntegration(first, second, manifest, expected);
@@ -895,7 +916,6 @@ try {
   assert.equal((await apiJson(first, '/api/projections/work')).length, 2, 'Repeated fixture replay must not accumulate Work.');
   assert.equal((await apiJson(first, '/api/projections/history')).length, 2, 'Repeated fixture replay must not accumulate History.');
 
-  await controlledUiSuite(browser);
   diagnosticPage = second;
   await second.getByRole('button', { name: 'Выйти', exact: true }).click();
   await second.getByRole('button', { name: 'Войти', exact: true }).waitFor();
@@ -919,6 +939,7 @@ try {
   await firstContext.close();
   await secondContext.close();
   console.log('PASS: isolated exact-cardinality lifecycle, concurrent registration idempotency, request-level History, realtime refetch, retained UI state, separate real and clearly-labelled controlled mixed-state screenshots, auth and 390px layout; zero provider calls.');
+  }
 } catch (error) {
   const redact = (value) => String(value)
     .replace(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '[redacted-jwt]')
