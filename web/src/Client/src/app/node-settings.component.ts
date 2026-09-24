@@ -225,7 +225,13 @@ export class NodeSettingsComponent implements OnChanges, OnDestroy {
   speedOptionSupported(mode: 'on' | 'off'): boolean {
     return this.catalogFresh() && !!this.selectedModel()?.speedModes.some(choice => choice.id === mode);
   }
+  speedLabel(): string {
+    return ({ on: 'Включён', off: 'Выключен' } as Record<string, string>)[this.draft()?.inference.speedMode || ''] || 'Настройка модели';
+  }
   reasoningSupported(): boolean { return this.catalogFresh() && !!this.selectedModel()?.reasoningEfforts.length; }
+  reasoningChoiceSupported(value: string): boolean {
+    return !!this.selectedModel()?.reasoningEfforts.some(choice => choice.id === value);
+  }
   setSpeed(enabled: boolean): void {
     const mode = enabled ? 'on' : 'off';
     const draft = this.draft();
@@ -238,6 +244,13 @@ export class NodeSettingsComponent implements OnChanges, OnDestroy {
     if (draft && this.reasoningSupported() && this.selectedModel()?.reasoningEfforts.some(choice => choice.id === value)) {
       draft.inference.reasoningEffort = value;
     }
+  }
+  setReasoningSelection(value: string | null): void {
+    if (!value) {
+      if (this.reasoningDefaultSupported()) this.resetReasoning();
+      return;
+    }
+    this.setReasoning(value);
   }
   reasoningLabel(value: string): string {
     return ({ none: 'Без рассуждений', minimal: 'Минимальная', low: 'Низкая', medium: 'Средняя',

@@ -813,6 +813,9 @@ async function controlledUiSuite(browser) {
   await page.getByTestId('open-agent-settings').click();
   const popup = page.getByTestId('settings-popup');
   await popup.waitFor();
+  assert.equal(await page.getByTestId('node-reasoning').inputValue(), 'medium', 'Saved reasoning level must be shown on opening.');
+  const compactBounds = await popup.boundingBox();
+  assert.ok(compactBounds && compactBounds.width <= 440, 'Agent settings must stay a compact floating panel.');
   const agentSettingsShot = join(outputDir, 'controlled-agent-settings.png');
   await popup.screenshot({ path: agentSettingsShot });
   assert.ok((await stat(agentSettingsShot)).size > 10_000, 'Agent settings screenshot must be nonempty.');
@@ -828,8 +831,17 @@ async function controlledUiSuite(browser) {
   const mobileAgentSettingsShot = join(outputDir, 'controlled-agent-settings-390.png');
   await popup.screenshot({ path: mobileAgentSettingsShot });
   assert.ok((await stat(mobileAgentSettingsShot)).size > 10_000, 'Mobile agent settings screenshot must be nonempty.');
+  await page.setViewportSize({ width: 320, height: 640 });
+  const narrowBounds = await popup.boundingBox();
+  assert.ok(narrowBounds && narrowBounds.x >= 0 && narrowBounds.x + narrowBounds.width <= 320, 'Agent settings must fit 320px.');
+  const narrowAgentSettingsShot = join(outputDir, 'controlled-agent-settings-320.png');
+  await popup.screenshot({ path: narrowAgentSettingsShot });
+  assert.ok((await stat(narrowAgentSettingsShot)).size > 10_000, 'Narrow agent settings screenshot must be nonempty.');
   await page.setViewportSize({ width: 2560, height: 1440 });
-  await page.getByTestId('node-speed-options').getByText('Быстрая', { exact: true }).click();
+  await page.getByTestId('node-reasoning').selectOption('low');
+  assert.equal(await page.getByTestId('node-reasoning').inputValue(), 'low', 'Reasoning menu must select an available level.');
+  await page.getByTestId('node-reasoning').selectOption('medium');
+  await page.getByTestId('node-speed').check();
   await page.keyboard.press('Escape');
   await popup.getByRole('group', { name: 'Несохранённые изменения' }).waitFor();
   await popup.getByRole('button', { name: 'Продолжить редактирование' }).click();
