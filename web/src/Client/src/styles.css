@@ -104,6 +104,8 @@ tbody tr:not(.group-row):hover, tbody tr.selected { background: var(--selected);
 .group-row span { color: var(--muted); font-weight: 400; }
 .row-title { display: block; width: 100%; height: calc(var(--row) - 1px); min-height: calc(var(--row) - 1px); padding: 0; overflow: hidden; border: 0; background: transparent; color: var(--ink); font-weight: 600; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
 .row-title:hover { background: transparent; color: var(--focus); }
+.nodes-table tbody tr { cursor: pointer; }
+.nodes-table tbody tr:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 .table-foot { display: flex; min-height: var(--row); align-items: center; padding: 0 var(--space-3); border-top: 1px solid var(--line); color: var(--muted); font-size: .923rem; }
 .empty-state { display: flex; min-height: 144px; align-items: center; justify-content: center; flex-direction: column; gap: var(--space-1); padding: var(--space-4); color: var(--muted); text-align: center; }
 .empty-state strong { color: var(--ink); }
@@ -195,6 +197,24 @@ tbody tr:not(.group-row):hover, tbody tr.selected { background: var(--selected);
 .settings-actions { margin-top: var(--space-3); justify-content: flex-end; }
 .settings-operation { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--space-2); margin-top: var(--space-2); padding: var(--space-2); border-left: 3px solid var(--focus); background: var(--focus-soft); overflow-wrap: anywhere; }
 .settings-error { justify-content: space-between; margin-top: var(--space-2); color: var(--danger); }
+.settings-modal-backdrop { position: fixed; z-index: 1000; inset: 0; display: grid; place-items: center; padding: var(--space-3); background: rgb(20 27 35 / 58%); }
+.settings-modal { display: flex; flex-direction: column; width: min(860px, 100%); max-height: calc(100dvh - 2 * var(--space-3)); border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface); box-shadow: var(--shadow-md); overflow: auto; }
+.settings-modal-head { display: flex; justify-content: space-between; align-items: flex-start; gap: var(--space-3); padding: var(--space-3); border-bottom: 1px solid var(--line); }
+.settings-modal-head h2 { margin: var(--space-1) 0 0; font-size: 1.25rem; }
+.settings-modal-head button { flex: none; min-width: var(--control); font-size: 1.4rem; line-height: 1; }
+.settings-modal-body { display: grid; align-content: start; gap: var(--space-3); min-height: 0; padding: var(--space-3); overflow: auto; }
+.settings-modal-body > label { display: grid; gap: var(--space-1); }
+.settings-modal-body select { width: 100%; }
+.settings-mode { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); padding: var(--space-2); border: 1px solid var(--line); border-radius: var(--radius); }
+.settings-mode > strong { min-width: 160px; }
+.settings-mode .toggle { display: flex; align-items: center; gap: var(--space-2); }
+.settings-mode input[type='range'] { width: min(300px, 100%); }
+.settings-modal-foot { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-2); padding: var(--space-3); border-top: 1px solid var(--line); }
+.mcp-json-editor { display: block; width: 100%; min-height: min(46dvh, 420px); padding: var(--space-2); border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--surface); color: var(--ink); font: .9rem/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; resize: vertical; tab-size: 2; }
+.mcp-json-editor:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.mcp-saved-checks { display: grid; gap: var(--space-2); padding-top: var(--space-2); border-top: 1px solid var(--line); }
+.mcp-saved-row { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: var(--space-2); }
+.settings-modal .apply-confirm { margin: 0 var(--space-3) var(--space-3); }
 .apply-confirm { margin-top: var(--space-2); padding: var(--space-3); border: 1px solid #d9c47a; border-left: 3px solid var(--warning); background: var(--warning-bg); }
 .apply-confirm p { color: #554717; }
 .banner.compact { margin: var(--space-3) 0; }

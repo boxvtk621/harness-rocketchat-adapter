@@ -15,6 +15,10 @@ builder.Services.AddOptions<CentrifugoOptions>().BindConfiguration("Centrifugo")
 builder.Services.AddOptions<HarnessOptions>().BindConfiguration("Harness").ValidateOnStart();
 builder.Services.AddSingleton<IMongoClient>(sp => new MongoClient(sp.GetRequiredService<IOptions<MongoOptions>>().Value.ConnectionString));
 builder.Services.AddSingleton<IConnectionRepository, MongoConnectionRepository>();
+builder.Services.AddSingleton<IResourceRevisions, MongoResourceRevisions>();
+builder.Services.AddSingleton<IEventRelations, MongoEventRelations>();
+builder.Services.AddSingleton<IEventCursors, MongoEventCursors>();
+builder.Services.AddSingleton<IOperationWatches, MongoOperationWatches>();
 builder.Services.AddSingleton<HarnessAddressPolicy>();
 builder.Services.AddSingleton<ConnectionDispatchFence>();
 builder.Services.AddDialogServices();
@@ -34,6 +38,7 @@ builder.Services.AddHttpClient<INodeSettingsClient, NodeSettingsClient>(client =
 builder.Logging.AddFilter("System.Net.Http.HttpClient.INodeSettingsClient", LogLevel.None);
 builder.Services.AddHostedService<HarnessObservationService>();
 builder.Services.AddHostedService<HarnessEventInvalidationService>();
+builder.Services.AddHostedService<OperationWatchService>();
 builder.Services.AddHttpClient<ICentrifugoPublisher, CentrifugoPublisher>();
 builder.Services.AddHealthChecks().AddCheck<MongoReadinessHealthCheck>("mongodb-ready", tags: ["ready"]);
 
@@ -62,10 +67,11 @@ app.MapHealthChecks("/health/ready", new HealthCheckOptions { Predicate = check 
 var connections = app.MapGroup("/api/connections").RequireInternalToken();
 connections.MapProviderAuth();
 connections.MapNodeSettings();
-connections.MapGet("/", async (IConnectionRepository store, CancellationToken ct) =>
+connections.MapGet("/", async (IConnectionRepository store, IResourceRevisions revisions, HttpContext context, CancellationToken ct) =>
 {
     var items = await store.ListAsync(ct);
     var identities = ConnectionIdentity.Analyze(items);
+    context.Response.Headers["X-List-Revision"] = (await revisions.ReadAsync("connections", "*", 0, null, ct)).ToString();
     return Results.Ok(items.Select(x => ConnectionResponse.From(x, identities[x.Id])));
 });
 connections.MapGet("/{id}", async (string id, IConnectionRepository store, CancellationToken ct) =>
@@ -77,13 +83,13 @@ connections.MapGet("/{id}", async (string id, IConnectionRepository store, Cance
     return Results.Ok(ConnectionResponse.From(item, identity));
 });
 connections.MapPost("/", async (ConnectionRequest input, IConnectionRepository store, HarnessAddressPolicy addresses,
-    ICentrifugoPublisher publisher, ILoggerFactory logs, HttpContext context, CancellationToken ct) =>
+    ICentrifugoPublisher publisher, IResourceRevisions revisions, ILoggerFactory logs, HttpContext context, CancellationToken ct) =>
 {
     var validation = ConnectionInput.Validate(input, addresses);
     if (validation.Error is not null) return Results.ValidationProblem(validation.Error);
     var now = DateTimeOffset.UtcNow;
     var item = new Connection(Guid.NewGuid().ToString("N"), validation.Name!, validation.BaseUri!, 1,
-        validation.Settings!, Observation.Unknown, now, now);
+        validation.Settings!, Observation.Unknown, now, now, NodeRevision: 1);
     var result = await store.CreateOrGetAsync(item, ct);
     var all = await store.ListAsync(ct);
     var identities = ConnectionIdentity.Analyze(all);
@@ -94,12 +100,18 @@ connections.MapPost("/", async (ConnectionRequest input, IConnectionRepository s
         context.Response.Headers["X-Connection-Reused"] = "true";
         return Results.Ok(response);
     }
-    await publisher.PublishInvalidationAsync("connections", result.Connection.Id, "created", ct);
+    var listRevision = await revisions.AdvanceAsync("connections", "*", 0, null, $"created:{result.Connection.Id}", ct);
+    await publisher.PublishInvalidationAsync(new Invalidation(1, "connections", result.Connection.Id, null,
+        result.Connection.ConfigEpoch, result.Connection.Id, null, result.Connection.ConfigEpoch, "created", listRevision), ct);
+    var nodesListRevision = await revisions.AdvanceAsync("nodes", "*", 0, null, $"created:{result.Connection.Id}", ct);
+    await publisher.PublishInvalidationAsync(new Invalidation(1, "nodes", result.Connection.Id,
+        result.Connection.Observation.NodeId, result.Connection.ConfigEpoch, null, null,
+        result.Connection.NodeRevision, "created", nodesListRevision), ct);
     logs.CreateLogger("Connections").LogInformation("Connection {ConnectionId} created", result.Connection.Id);
     return Results.Created($"/api/connections/{result.Connection.Id}", response);
 });
 connections.MapPut("/{id}", async (string id, ConnectionRequest input, IConnectionRepository store,
-    HarnessAddressPolicy addresses, ICentrifugoPublisher publisher, ILoggerFactory logs,
+    HarnessAddressPolicy addresses, ICentrifugoPublisher publisher, IResourceRevisions revisions, ILoggerFactory logs,
     ConnectionDispatchFence fence, CancellationToken ct) =>
 {
     var validation = ConnectionInput.Validate(input, addresses);
@@ -107,28 +119,46 @@ connections.MapPut("/{id}", async (string id, ConnectionRequest input, IConnecti
     await using var dispatchLease = await fence.EnterAsync(id, ct);
     var old = await store.GetAsync(id, ct);
     if (old is null) return Results.NotFound();
+    var beforeIdentities = ConnectionIdentity.Analyze(await store.ListAsync(ct));
     var uriChanged = !string.Equals(old.BaseUri, validation.BaseUri, StringComparison.Ordinal);
     var item = old with
     {
         Name = validation.Name!, BaseUri = validation.BaseUri!, Settings = validation.Settings!,
         ConfigEpoch = checked(old.ConfigEpoch + 1),
         Observation = uriChanged ? Observation.Unknown : old.Observation,
+        NodeRevision = checked(old.NodeRevision + 1),
         UpdatedAt = DateTimeOffset.UtcNow
     };
     if (!await store.ReplaceAsync(item, old.ConfigEpoch, ct)) return Results.Conflict(new { detail = "Connection changed concurrently; reload and retry." });
-    await publisher.PublishInvalidationAsync("connections", item.Id, "updated", ct);
+    var listRevision = await revisions.AdvanceAsync("connections", "*", 0, null, $"updated:{item.Id}:{item.ConfigEpoch}", ct);
+    await publisher.PublishInvalidationAsync(new Invalidation(1, "connections", item.Id, item.Observation.NodeId,
+        item.ConfigEpoch, item.Id, null, item.ConfigEpoch, "updated", listRevision), ct);
+    var nodesListRevision = await revisions.AdvanceAsync("nodes", "*", 0, null, $"updated:{item.Id}:{item.ConfigEpoch}", ct);
+    await publisher.PublishInvalidationAsync(new Invalidation(1, "nodes", item.Id, item.Observation.NodeId,
+        item.ConfigEpoch, null, null, item.NodeRevision, "updated", nodesListRevision), ct);
     logs.CreateLogger("Connections").LogInformation("Connection {ConnectionId} updated at epoch {ConfigEpoch}", item.Id, item.ConfigEpoch);
     var all = await store.ListAsync(ct);
     var identities = ConnectionIdentity.Analyze(all);
+    foreach (var changed in all)
+    {
+        if (changed.Id == id || !beforeIdentities.TryGetValue(changed.Id, out var previous) ||
+            previous.Status == identities[changed.Id].Status &&
+            previous.ConflictingConnectionIds.SequenceEqual(identities[changed.Id].ConflictingConnectionIds)) continue;
+        var revised = await store.AdvanceNodeRevisionAsync(changed.Id, changed.ConfigEpoch, ct);
+        if (revised is not null)
+            await publisher.PublishInvalidationAsync(new Invalidation(1, "nodes", revised.Id, revised.Observation.NodeId,
+                revised.ConfigEpoch, null, null, revised.NodeRevision, "identity_changed", nodesListRevision), ct);
+    }
     identities.TryGetValue(item.Id, out var identity);
     return Results.Ok(ConnectionResponse.From(item, identity));
 });
 
 var projections = app.MapGroup("/api/projections").RequireInternalToken();
-projections.MapGet("/nodes", async (IConnectionRepository store, CancellationToken ct) =>
+projections.MapGet("/nodes", async (IConnectionRepository store, IResourceRevisions revisions, HttpContext context, CancellationToken ct) =>
 {
     var items = await store.ListAsync(ct);
     var identities = ConnectionIdentity.Analyze(items);
+    context.Response.Headers["X-List-Revision"] = (await revisions.ReadAsync("nodes", "*", 0, null, ct)).ToString();
     var result = items
         .GroupBy(x => x.Observation.Compatibility == "compatible" && Guid.TryParse(x.Observation.NodeId, out var id)
             ? $"node:{id:D}" : $"endpoint:{ConnectionIdentity.EndpointKey(x)}", StringComparer.Ordinal)
@@ -150,6 +180,60 @@ projections.MapGet("/history", async (IConnectionRepository store, IHarnessClien
     var conflicts = ConnectionIdentity.FindConflicts(items);
     if (conflicts.Count > 0) return Results.Conflict(new { code = "node_id_conflict", conflicts });
     try { return Results.Ok(await HarnessProjectionReader.ReadHistoryAsync(items, client, ct)); }
+    catch (ProjectionUnavailableException) { return Results.StatusCode(StatusCodes.Status503ServiceUnavailable); }
+});
+projections.MapGet("/nodes/{connectionId}", async (string connectionId, IConnectionRepository store, CancellationToken ct) =>
+{
+    var item = await store.GetAsync(connectionId, ct);
+    if (item is null) return Results.NotFound();
+    var identities = ConnectionIdentity.Analyze(await store.ListAsync(ct));
+    return Results.Ok(new { resource = "nodes", connectionId, configEpoch = item.ConfigEpoch,
+        revision = item.NodeRevision, listRevision = item.NodeRevision,
+        lastObservedAt = item.Observation.AttemptedAt, syncedAt = DateTimeOffset.UtcNow,
+        item = NodeProjection.From(item, identities[item.Id]) });
+});
+projections.MapGet("/work/{connectionId}", async (string connectionId, string? requestId,
+    IConnectionRepository store, IHarnessClient client, IResourceRevisions revisions, CancellationToken ct) =>
+{
+    var item = await store.GetAsync(connectionId, ct);
+    if (item is null) return Results.NotFound();
+    if (requestId is not null && !Guid.TryParseExact(requestId, "D", out _)) return Results.BadRequest();
+    var identities = ConnectionIdentity.Analyze(await store.ListAsync(ct));
+    if (identities[item.Id].Status == ConnectionIdentity.NodeIdConflict)
+        return Results.Conflict(new { code = "node_id_conflict" });
+    try
+    {
+        var rows = await HarnessProjectionReader.ReadWorkAsync([item], client, ct);
+        var listRevision = await revisions.ReadAsync("work", connectionId, item.ConfigEpoch, null, ct);
+        var revision = requestId is null ? listRevision : await revisions.ReadAsync("work", connectionId, item.ConfigEpoch, requestId, ct);
+        return Results.Ok(new { resource = "work", connectionId, nodeId = item.Observation.NodeId,
+            configEpoch = item.ConfigEpoch, revision, listRevision,
+            lastObservedAt = item.Observation.AttemptedAt, syncedAt = DateTimeOffset.UtcNow,
+            item = requestId is null ? null : rows.FirstOrDefault(x => x.RequestId == requestId),
+            items = requestId is null ? rows : null });
+    }
+    catch (ProjectionUnavailableException) { return Results.StatusCode(StatusCodes.Status503ServiceUnavailable); }
+});
+projections.MapGet("/history/{connectionId}", async (string connectionId, string? requestId,
+    IConnectionRepository store, IHarnessClient client, IResourceRevisions revisions, CancellationToken ct) =>
+{
+    var item = await store.GetAsync(connectionId, ct);
+    if (item is null) return Results.NotFound();
+    if (requestId is not null && !Guid.TryParseExact(requestId, "D", out _)) return Results.BadRequest();
+    var identities = ConnectionIdentity.Analyze(await store.ListAsync(ct));
+    if (identities[item.Id].Status == ConnectionIdentity.NodeIdConflict)
+        return Results.Conflict(new { code = "node_id_conflict" });
+    try
+    {
+        var rows = await HarnessProjectionReader.ReadHistoryAsync([item], client, ct);
+        var listRevision = await revisions.ReadAsync("history", connectionId, item.ConfigEpoch, null, ct);
+        var revision = requestId is null ? listRevision : await revisions.ReadAsync("history", connectionId, item.ConfigEpoch, requestId, ct);
+        return Results.Ok(new { resource = "history", connectionId, nodeId = item.Observation.NodeId,
+            configEpoch = item.ConfigEpoch, revision, listRevision,
+            lastObservedAt = item.Observation.AttemptedAt, syncedAt = DateTimeOffset.UtcNow,
+            item = requestId is null ? null : rows.FirstOrDefault(x => x.RequestId == requestId),
+            items = requestId is null ? rows : null });
+    }
     catch (ProjectionUnavailableException) { return Results.StatusCode(StatusCodes.Status503ServiceUnavailable); }
 });
 

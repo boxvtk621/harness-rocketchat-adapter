@@ -136,9 +136,17 @@ public sealed class AdapterFactory : WebApplicationFactory<Program>
         {
             services.RemoveAll<IConnectionRepository>();
             services.RemoveAll<ICentrifugoPublisher>();
+            services.RemoveAll<IResourceRevisions>();
+            services.RemoveAll<IEventRelations>();
+            services.RemoveAll<IEventCursors>();
+            services.RemoveAll<IOperationWatches>();
             services.RemoveAll<IHostedService>();
             services.AddSingleton<IConnectionRepository, MemoryConnectionRepository>();
             services.AddSingleton<ICentrifugoPublisher, NoopPublisher>();
+            services.AddSingleton<IResourceRevisions, MemoryResourceRevisions>();
+            services.AddSingleton<IEventRelations, MemoryEventRelations>();
+            services.AddSingleton<IEventCursors, MemoryEventCursors>();
+            services.AddSingleton<IOperationWatches, MemoryOperationWatches>();
         });
     }
 }
@@ -192,4 +200,74 @@ public sealed class MemoryConnectionRepository : IConnectionRepository
 public sealed class NoopPublisher : ICentrifugoPublisher
 {
     public Task PublishInvalidationAsync(string resource, string connectionId, string kind, CancellationToken cancellationToken) => Task.CompletedTask;
+}
+
+public sealed class MemoryResourceRevisions : IResourceRevisions
+{
+    private readonly Dictionary<string, (long Revision, string Marker)> _values = [];
+    private static string Key(string resource, string connectionId, long epoch, string? entityId) =>
+        $"{resource}:{connectionId}:{epoch}:{entityId}";
+    public Task<long> ReadAsync(string resource, string connectionId, long epoch, string? entityId, CancellationToken ct)
+    {
+        lock (_values) return Task.FromResult(_values.GetValueOrDefault(Key(resource, connectionId, epoch, entityId)).Revision);
+    }
+    public Task<long?> AdvanceAsync(string resource, string connectionId, long epoch, string? entityId, string marker, CancellationToken ct)
+    {
+        lock (_values)
+        {
+            var key = Key(resource, connectionId, epoch, entityId);
+            var current = _values.GetValueOrDefault(key);
+            if (current.Marker == marker) return Task.FromResult<long?>(null);
+            _values[key] = (current.Revision + 1, marker);
+            return Task.FromResult<long?>(current.Revision + 1);
+        }
+    }
+}
+
+public sealed class MemoryEventRelations : IEventRelations
+{
+    private readonly Dictionary<string, string> _values = [];
+    private static string Key(string connectionId, long epoch, string attemptId) => $"{connectionId}:{epoch}:{attemptId}";
+    public Task RememberAsync(string connectionId, long epoch, string attemptId, string requestId, CancellationToken ct)
+    {
+        lock (_values) _values[Key(connectionId, epoch, attemptId)] = requestId;
+        return Task.CompletedTask;
+    }
+    public Task<string?> RequestAsync(string connectionId, long epoch, string attemptId, CancellationToken ct)
+    {
+        lock (_values) return Task.FromResult(_values.GetValueOrDefault(Key(connectionId, epoch, attemptId)));
+    }
+}
+
+public sealed class MemoryEventCursors : IEventCursors
+{
+    private readonly Dictionary<string, long> _values = [];
+    public TaskCompletionSource FirstAdvance { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource SecondAdvance { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private static string Key(Connection connection) =>
+        $"{connection.Id}:{connection.ConfigEpoch}:{connection.Observation.NodeId}:{connection.Observation.BootId}";
+    public Task<long> ReadAsync(Connection connection, CancellationToken ct)
+    {
+        lock (_values) return Task.FromResult(_values.GetValueOrDefault(Key(connection)));
+    }
+    public Task AdvanceAsync(Connection connection, long seq, CancellationToken ct)
+    {
+        lock (_values)
+        {
+            var key = Key(connection);
+            _values[key] = Math.Max(_values.GetValueOrDefault(key), seq);
+        }
+        if (seq >= 1) FirstAdvance.TrySetResult();
+        if (seq >= 2) SecondAdvance.TrySetResult();
+        return Task.CompletedTask;
+    }
+}
+
+public sealed class MemoryOperationWatches : IOperationWatches
+{
+    public Task RegisterAsync(string resource, Connection connection, string nodeId, string operationId, CancellationToken ct) => Task.CompletedTask;
+    public Task<IReadOnlyList<OperationWatchDocument>> ActiveAsync(CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<OperationWatchDocument>>([]);
+    public Task<string?> StatusAsync(string resource, string connectionId, long epoch, string operationId, CancellationToken ct) => Task.FromResult<string?>(null);
+    public Task CompleteAsync(string id, string status, CancellationToken ct) => Task.CompletedTask;
 }

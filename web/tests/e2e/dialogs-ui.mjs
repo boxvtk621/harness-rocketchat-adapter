@@ -481,7 +481,7 @@ try {
   await page.getByTestId('nav-nodes').click();
   assert.equal(await page.getByTestId('nav-settings').count(), 0, 'Duplicating Settings navigation is removed');
   await poll(async () => assert.equal(await page.getByTestId('node-provider-auth-fixture').innerText(), 'Аккаунт подключён'), 'Provider authentication is visible in the Nodes table');
-  await page.getByTestId('node-row-fixture').getByRole('button').click();
+  await page.getByTestId('node-row-fixture').click();
   await page.getByTestId('provider-auth').waitFor();
   assert.equal(await page.getByTestId('provider-auth').count(), 1, 'Provider auth exists once in the unified Nodes inspector');
   assert.ok(await page.getByTestId('node-inspector').locator('.inspector-card').count() >= 3, 'Node settings are grouped into readable inspector sections');

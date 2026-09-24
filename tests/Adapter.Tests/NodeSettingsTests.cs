@@ -79,6 +79,29 @@ public sealed class NodeSettingsTests
     }
 
     [Fact]
+    public async Task Unsaved_mcp_validation_is_proxied_without_publishing_or_mutating_connection()
+    {
+        var spy = new Spy();
+        using var factory = new AdapterFactory().WithWebHostBuilder(builder => builder.ConfigureServices(services =>
+        {
+            services.RemoveAll<INodeSettingsClient>(); services.AddSingleton<INodeSettingsClient>(spy);
+        }));
+        var store = factory.Services.GetRequiredService<IConnectionRepository>();
+        await store.CreateOrGetAsync(Connection(), default);
+        var before = await store.GetAsync("connection", default);
+        var http = factory.CreateClient(); http.DefaultRequestHeaders.Add("X-Internal-Token", "test-secret");
+        const string body = "{\"schemaId\":\"harness-mcp-document-v2\",\"servers\":[]}";
+        var response = await http.PostAsync($"/api/connections/connection/node-settings/mcp-validate?nodeId={NodeId}&configEpoch=7",
+            new StringContent(body, Encoding.UTF8, "application/json"));
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("mcp-validate", Assert.Single(spy.LastSuffix));
+        Assert.Equal(body, Encoding.UTF8.GetString(spy.LastBody!));
+        Assert.Equal(before, await store.GetAsync("connection", default));
+        Assert.Equal(0, await factory.Services.GetRequiredService<IResourceRevisions>()
+            .ReadAsync("node_settings", "connection", 7, NodeId, default));
+    }
+
+    [Fact]
     public async Task Late_reply_is_discarded_when_adapter_connection_epoch_changes()
     {
         var spy = new Spy();
@@ -125,11 +148,11 @@ public sealed class NodeSettingsTests
     { protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) => send(request); }
     private sealed class Spy : INodeSettingsClient
     {
-        public int Calls; public byte[]? LastBody; public Func<Task>? BeforeReply;
+        public int Calls; public byte[]? LastBody; public IReadOnlyList<string> LastSuffix = []; public Func<Task>? BeforeReply;
         public async Task<NodeSettingsResult> SendAsync(Connection connection, string nodeId, HttpMethod method,
             IReadOnlyList<string> suffix, IReadOnlyDictionary<string, string?> query, byte[]? body, CancellationToken ct)
         {
-            Calls++; LastBody = body; if (BeforeReply is not null) await BeforeReply();
+            Calls++; LastBody = body; LastSuffix = suffix; if (BeforeReply is not null) await BeforeReply();
             using var json = JsonDocument.Parse("{\"schemaId\":\"harness-node-settings-v1\",\"revision\":3}");
             return new(200, json.RootElement.Clone());
         }

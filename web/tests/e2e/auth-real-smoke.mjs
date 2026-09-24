@@ -62,7 +62,7 @@ try {
     }
     evidence.nodes.push(item);
     await page.getByTestId('nav-nodes').click();
-    await page.getByTestId('node-row-' + connection.id).getByRole('button').click();
+    await page.getByTestId('node-row-' + connection.id).click();
     await poll(async () => {
       assert.equal(await page.getByTestId('connection-name').inputValue(), spec.name);
       assert.equal(await page.getByTestId('provider-auth-state').innerText(), 'Вход не выполнен');

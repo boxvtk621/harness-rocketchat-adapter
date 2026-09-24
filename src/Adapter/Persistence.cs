@@ -10,6 +10,15 @@ public interface IConnectionRepository
     Task<ConnectionCreateResult> CreateOrGetAsync(Connection connection, CancellationToken cancellationToken);
     Task<bool> ReplaceAsync(Connection connection, long expectedEpoch, CancellationToken cancellationToken);
     Task<bool> UpdateObservationAsync(string id, long epoch, Observation observation, CancellationToken cancellationToken);
+    async Task<ObservationCommit> CommitObservationAsync(string id, long epoch, Observation observation, CancellationToken ct)
+    {
+        var old = await GetAsync(id, ct);
+        if (old is null || old.ConfigEpoch != epoch) return new(false, false, null);
+        var changed = ObservationSemantics.Key(old) != ObservationSemantics.Key(old with { Observation = observation });
+        if (!await UpdateObservationAsync(id, epoch, observation, ct)) return new(false, false, null);
+        return new(true, changed, (await GetAsync(id, ct)) ?? old with { Observation = observation });
+    }
+    async Task<Connection?> AdvanceNodeRevisionAsync(string id, long epoch, CancellationToken ct) => await GetAsync(id, ct);
     Task PingAsync(CancellationToken cancellationToken);
 }
 
@@ -100,6 +109,36 @@ public sealed class MongoConnectionRepository : IConnectionRepository
             Builders<ConnectionDocument>.Update.Set(x => x.Observation, observation), cancellationToken: ct);
         return result.ModifiedCount == 1;
     }
+    public async Task<ObservationCommit> CommitObservationAsync(string id, long epoch, Observation observation, CancellationToken ct)
+    {
+        for (var attempt = 0; attempt < 5; attempt++)
+        {
+            var old = await GetAsync(id, ct);
+            if (old is null || old.ConfigEpoch != epoch) return new(false, false, null);
+            if (old.Observation.AttemptedAt > observation.AttemptedAt) return new(false, false, null);
+            var changed = ObservationSemantics.Key(old) != ObservationSemantics.Key(old with { Observation = observation });
+            var version = Builders<ConnectionDocument>.Filter.Eq(x => x.ObservationVersion, old.ObservationVersion);
+            if (old.ObservationVersion == 0) version |= Builders<ConnectionDocument>.Filter.Exists(x => x.ObservationVersion, false);
+            var filter = Builders<ConnectionDocument>.Filter.Eq(x => x.Id, id) &
+                Builders<ConnectionDocument>.Filter.Eq(x => x.ConfigEpoch, epoch) & version;
+            var updates = new List<UpdateDefinition<ConnectionDocument>>
+            {
+                Builders<ConnectionDocument>.Update.Set(x => x.Observation, observation),
+                Builders<ConnectionDocument>.Update.Inc(x => x.ObservationVersion, 1)
+            };
+            if (changed) updates.Add(Builders<ConnectionDocument>.Update.Inc(x => x.NodeRevision, 1));
+            var update = Builders<ConnectionDocument>.Update.Combine(updates);
+            var next = await _connections.FindOneAndUpdateAsync(filter, update,
+                new FindOneAndUpdateOptions<ConnectionDocument> { ReturnDocument = ReturnDocument.After }, ct);
+            if (next is not null) return new(true, changed, next.ToModel());
+        }
+        return new(false, false, null);
+    }
+    public async Task<Connection?> AdvanceNodeRevisionAsync(string id, long epoch, CancellationToken ct) =>
+        (await _connections.FindOneAndUpdateAsync(
+            x => x.Id == id && x.ConfigEpoch == epoch,
+            Builders<ConnectionDocument>.Update.Inc(x => x.NodeRevision, 1),
+            new FindOneAndUpdateOptions<ConnectionDocument> { ReturnDocument = ReturnDocument.After }, ct))?.ToModel();
     public async Task PingAsync(CancellationToken ct) => await _database.RunCommandAsync<MongoDB.Bson.BsonDocument>(new MongoDB.Bson.BsonDocument("ping", 1), cancellationToken: ct);
 
     private Task CreateIndexesAsync()
@@ -128,6 +167,8 @@ public sealed class ConnectionDocument
     [BsonElement("configEpoch")] public long ConfigEpoch { get; init; }
     [BsonElement("observationSettings")] public ObservationSettings? Settings { get; init; }
     [BsonElement("observation")] public Observation? Observation { get; init; }
+    [BsonElement("nodeRevision")] public long NodeRevision { get; init; }
+    [BsonElement("observationVersion")] public long ObservationVersion { get; init; }
     [BsonElement("createdAt")] public DateTimeOffset CreatedAt { get; init; }
     [BsonElement("updatedAt")] public DateTimeOffset UpdatedAt { get; init; }
     public Connection ToModel()
@@ -138,13 +179,14 @@ public sealed class ConnectionDocument
         if (Guid.TryParse(observation.NodeId, out var nodeId))
             observation = observation with { NodeId = nodeId.ToString("D") };
         return new(Id, Name, BaseUri, ConfigEpoch < 1 ? 1 : ConfigEpoch,
-            Settings ?? ObservationSettings.Default, observation, CreatedAt, UpdatedAt);
+            Settings ?? ObservationSettings.Default, observation, CreatedAt, UpdatedAt, NodeRevision, ObservationVersion);
     }
     public static ConnectionDocument From(Connection value) => new()
     {
         Id = value.Id, Name = value.Name, BaseUri = value.BaseUri,
         EndpointKey = ConnectionIdentity.EndpointKey(value), ConfigEpoch = value.ConfigEpoch,
-        Settings = value.Settings, Observation = value.Observation, CreatedAt = value.CreatedAt, UpdatedAt = value.UpdatedAt
+        Settings = value.Settings, Observation = value.Observation, CreatedAt = value.CreatedAt, UpdatedAt = value.UpdatedAt,
+        NodeRevision = value.NodeRevision, ObservationVersion = value.ObservationVersion
     };
 }
 
@@ -176,10 +218,15 @@ public static class AuthEndpointExtensions
 public interface ICentrifugoPublisher
 {
     Task PublishInvalidationAsync(string resource, string connectionId, string kind, CancellationToken cancellationToken);
+    Task PublishInvalidationAsync(Invalidation change, CancellationToken cancellationToken) =>
+        PublishInvalidationAsync(change.Resource, change.ConnectionId, change.Kind, cancellationToken);
 }
 public sealed class CentrifugoPublisher(HttpClient client, IOptions<CentrifugoOptions> options, ILogger<CentrifugoPublisher> logger) : ICentrifugoPublisher
 {
-    public async Task PublishInvalidationAsync(string resource, string connectionId, string kind, CancellationToken ct)
+    public Task PublishInvalidationAsync(string resource, string connectionId, string kind, CancellationToken ct) =>
+        PublishInvalidationAsync(new Invalidation(1, resource, connectionId, null, 0, null, null, 0, kind), ct);
+
+    public async Task PublishInvalidationAsync(Invalidation change, CancellationToken ct)
     {
         var config = options.Value;
         if (!Uri.TryCreate(config.PublishUrl, UriKind.Absolute, out var url)) return;
@@ -187,16 +234,16 @@ public sealed class CentrifugoPublisher(HttpClient client, IOptions<CentrifugoOp
         {
             using var request = new HttpRequestMessage(HttpMethod.Post, url)
             {
-                Content = JsonContent.Create(new { channel = "connections", data = new { resource, connectionId, kind } })
+                Content = JsonContent.Create(new { channel = "connections", data = change })
             };
             if (!string.IsNullOrWhiteSpace(config.ApiKey)) request.Headers.TryAddWithoutValidation("X-API-Key", config.ApiKey);
             using var response = await client.SendAsync(request, ct);
             if (!response.IsSuccessStatusCode)
-                logger.LogWarning("Centrifugo publish failed for connection {ConnectionId}: HTTP {StatusCode}", connectionId, (int)response.StatusCode);
+                logger.LogWarning("Centrifugo publish failed for connection {ConnectionId}: HTTP {StatusCode}", change.ConnectionId, (int)response.StatusCode);
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
         {
-            logger.LogWarning("Centrifugo publish failed for connection {ConnectionId}: {ErrorType}", connectionId, ex.GetType().Name);
+            logger.LogWarning("Centrifugo publish failed for connection {ConnectionId}: {ErrorType}", change.ConnectionId, ex.GetType().Name);
         }
     }
 }

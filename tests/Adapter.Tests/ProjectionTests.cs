@@ -9,6 +9,25 @@ public class ProjectionTests
     private const string TerminalDialog = "30000000-0000-4000-8000-000000000001";
     private const string ActiveDialog = "30000000-0000-4000-8000-000000000002";
 
+    [Fact]
+    public void Timestamp_only_probe_does_not_change_node_semantics_but_deadline_does()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var connection = Connection() with { Observation = Observation.Unknown with
+        {
+            AttemptedAt = now, SuccessfulAt = now, HeartbeatAt = now, HttpReachable = true,
+            ExecutorHealthy = true, Ready = true, Compatibility = "compatible", BootId = NodeId,
+            NodeId = NodeId, HeartbeatFresh = true
+        } };
+        var timestampOnly = connection with { Observation = connection.Observation with
+        { AttemptedAt = now.AddSeconds(1), SuccessfulAt = now.AddSeconds(1), HeartbeatAt = now.AddSeconds(1) } };
+        Assert.Equal(ObservationSemantics.Key(connection), ObservationSemantics.Key(timestampOnly));
+        var stale = connection with { Observation = ObservationSemantics.WithFreshness(connection.Observation,
+            connection.Settings, now.AddSeconds(connection.Settings.StaleThresholdSeconds + 1)) };
+        Assert.NotEqual(ObservationSemantics.Key(connection), ObservationSemantics.Key(stale));
+        Assert.Equal("stale", ObservationResponse.From(stale).Availability);
+    }
+
     [Theory]
     [InlineData("later", 2)]
     [InlineData("cap", 5)]
@@ -187,21 +206,69 @@ public class ProjectionTests
     }
 
     [Fact]
-    public async Task Event_worker_starts_at_snapshot_cursor_and_publishes_new_event_only()
+    public async Task Event_worker_replays_from_zero_when_no_cursor_is_persisted()
     {
         var store = new MemoryConnectionRepository();
         await store.CreateOrGetAsync(Connection(), default);
         var client = new EventClient();
         var publisher = new RecordingPublisher();
-        var service = new HarnessEventInvalidationService(store, client, publisher,
+        var service = new HarnessEventInvalidationService(store, client, new MemoryResourceRevisions(),
+            new MemoryEventRelations(), new MemoryEventCursors(), publisher,
             NullLogger<HarnessEventInvalidationService>.Instance);
         await service.StartAsync(default);
         await publisher.EventPublished.Task.WaitAsync(TimeSpan.FromSeconds(5));
         await service.StopAsync(default);
 
-        Assert.Equal(42, client.StartedAfter);
-        Assert.Contains(publisher.Calls, x => x.Kind == "event-stream-start");
-        Assert.Contains(publisher.Calls, x => x.Kind == "event");
+        Assert.Equal(0, client.StartedAfter);
+        Assert.DoesNotContain(publisher.Calls, x => x.Kind == "event-stream-start");
+        Assert.Contains(publisher.Calls, x => x.Resource == "work" && x.Kind == "request.created");
+        Assert.DoesNotContain(publisher.Calls, x => x.Resource == "history");
+    }
+
+    [Fact]
+    public async Task Attempt_terminal_uses_persisted_request_relation_for_exact_history()
+    {
+        var store = new MemoryConnectionRepository();
+        await store.CreateOrGetAsync(Connection(), default);
+        var publisher = new RecordingPublisher();
+        var service = new HarnessEventInvalidationService(store, new AttemptEventClient(),
+            new MemoryResourceRevisions(), new MemoryEventRelations(), new MemoryEventCursors(), publisher,
+            NullLogger<HarnessEventInvalidationService>.Instance);
+        await service.StartAsync(default);
+        await publisher.HistoryPublished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await service.StopAsync(default);
+        Assert.Contains(publisher.Calls, x => x.Resource == "history" && x.Kind == "attempt.completed");
+    }
+
+    [Fact]
+    public async Task Restart_resumes_persisted_cursor_and_ignores_duplicate_event()
+    {
+        var store = new MemoryConnectionRepository();
+        await store.CreateOrGetAsync(Connection(), default);
+        var cursors = new MemoryEventCursors();
+        var revisions = new MemoryResourceRevisions();
+        var relations = new MemoryEventRelations();
+        var publisher = new RecordingPublisher();
+        var firstClient = new ReplayEventClient(false);
+        var first = new HarnessEventInvalidationService(store, firstClient, revisions, relations, cursors, publisher,
+            NullLogger<HarnessEventInvalidationService>.Instance);
+        await first.StartAsync(default);
+        await publisher.EventPublished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await cursors.FirstAdvance.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await first.StopAsync(default);
+
+        var secondClient = new ReplayEventClient(true);
+        var second = new HarnessEventInvalidationService(store, secondClient, revisions, relations, cursors, publisher,
+            NullLogger<HarnessEventInvalidationService>.Instance);
+        await second.StartAsync(default);
+        await publisher.SecondWorkPublished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await cursors.SecondAdvance.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await second.StopAsync(default);
+
+        Assert.Equal(0, firstClient.StartedAfter);
+        Assert.Equal(1, secondClient.StartedAfter);
+        Assert.Equal(2, publisher.Calls.Count(x => x.Resource == "work"));
+        Assert.Equal(2, await cursors.ReadAsync(Connection(), default));
     }
 
     [Fact]
@@ -211,7 +278,8 @@ public class ProjectionTests
         var original = Connection();
         await store.CreateOrGetAsync(original, default);
         var client = new ConcurrencyEventClient();
-        var service = new HarnessEventInvalidationService(store, client, new RecordingPublisher(),
+        var service = new HarnessEventInvalidationService(store, client, new MemoryResourceRevisions(),
+            new MemoryEventRelations(), new MemoryEventCursors(), new RecordingPublisher(),
             NullLogger<HarnessEventInvalidationService>.Instance);
         await service.StartAsync(default);
         await client.FirstStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -300,6 +368,54 @@ public class ProjectionTests
             yield return after + 1;
             await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
         }
+        public async IAsyncEnumerable<HarnessEvent> WatchDetailedEventsAsync(Connection connection, long after,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            StartedAfter = after;
+            // The event already existed before the worker started; bootstrapping from the snapshot
+            // cursor (42) would skip it and leave an open Work view stale.
+            yield return new HarnessEvent(43, "request.created", NodeId, RequestId(1), ActiveDialog, RequestId(1));
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        }
+    }
+
+    private sealed class AttemptEventClient : IHarnessClient
+    {
+        public Task<HarnessProbeResult> ProbeAsync(Connection connection, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<JsonDocument?> GetAsync(Connection connection, IReadOnlyList<string> path,
+            IReadOnlyDictionary<string, string?>? query, CancellationToken cancellationToken) =>
+            Task.FromResult<JsonDocument?>(Document("{\"lastEventSeq\":42}"));
+        public async IAsyncEnumerable<long> WatchEventsAsync(Connection connection, long after,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        { await Task.CompletedTask; yield break; }
+        public async IAsyncEnumerable<HarnessEvent> WatchDetailedEventsAsync(Connection connection, long after,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            var attempt = AttemptId(1);
+            yield return new HarnessEvent(43, "attempt.dispatching", NodeId, attempt, ActiveDialog, RequestId(1), attempt);
+            yield return new HarnessEvent(44, "attempt.completed", NodeId, attempt, ActiveDialog, null, attempt);
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        }
+    }
+
+    private sealed class ReplayEventClient(bool sendSecond) : IHarnessClient
+    {
+        public long? StartedAfter { get; private set; }
+        public Task<HarnessProbeResult> ProbeAsync(Connection connection, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<JsonDocument?> GetAsync(Connection connection, IReadOnlyList<string> path,
+            IReadOnlyDictionary<string, string?>? query, CancellationToken cancellationToken) => Task.FromResult<JsonDocument?>(null);
+        public async IAsyncEnumerable<long> WatchEventsAsync(Connection connection, long after,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        { await Task.CompletedTask; yield break; }
+        public async IAsyncEnumerable<HarnessEvent> WatchDetailedEventsAsync(Connection connection, long after,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            StartedAfter = after;
+            yield return new HarnessEvent(1, "request.created", NodeId, RequestId(1), ActiveDialog, RequestId(1));
+            if (sendSecond)
+                yield return new HarnessEvent(2, "request.created", NodeId, RequestId(2), ActiveDialog, RequestId(2));
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        }
     }
 
     private sealed class ConcurrencyEventClient : IHarnessClient
@@ -368,10 +484,14 @@ public class ProjectionTests
     {
         public List<(string Resource, string Kind)> Calls { get; } = [];
         public TaskCompletionSource EventPublished { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource HistoryPublished { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource SecondWorkPublished { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public Task PublishInvalidationAsync(string resource, string connectionId, string kind, CancellationToken cancellationToken)
         {
             Calls.Add((resource, kind));
-            if (kind == "event") EventPublished.TrySetResult();
+            if (resource == "work") EventPublished.TrySetResult();
+            if (resource == "work" && Calls.Count(x => x.Resource == "work") == 2) SecondWorkPublished.TrySetResult();
+            if (resource == "history") HistoryPublished.TrySetResult();
             return Task.CompletedTask;
         }
     }

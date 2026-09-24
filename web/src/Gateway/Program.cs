@@ -116,6 +116,12 @@ app.MapMethods("/api/connections", ["GET", "POST"], ProxyToAdapter)
 app.MapGet("/api/projections/nodes", (HttpContext context, IHttpClientFactory factory) => ProxyToAdapter(context, factory, "projections/nodes")).RequireAuthorization();
 app.MapGet("/api/projections/work", (HttpContext context, IHttpClientFactory factory) => ProxyToAdapter(context, factory, "projections/work")).RequireAuthorization();
 app.MapGet("/api/projections/history", (HttpContext context, IHttpClientFactory factory) => ProxyToAdapter(context, factory, "projections/history")).RequireAuthorization();
+app.MapGet("/api/projections/nodes/{connectionId}", (HttpContext context, IHttpClientFactory factory, string connectionId) =>
+    ProxyToAdapter(context, factory, $"projections/nodes/{Uri.EscapeDataString(connectionId)}")).RequireAuthorization();
+app.MapGet("/api/projections/work/{connectionId}", (HttpContext context, IHttpClientFactory factory, string connectionId) =>
+    ProxyToAdapter(context, factory, $"projections/work/{Uri.EscapeDataString(connectionId)}")).RequireAuthorization();
+app.MapGet("/api/projections/history/{connectionId}", (HttpContext context, IHttpClientFactory factory, string connectionId) =>
+    ProxyToAdapter(context, factory, $"projections/history/{Uri.EscapeDataString(connectionId)}")).RequireAuthorization();
 app.MapMethods("/api/dialogs/{**path}", ["GET", "POST"],
     (HttpContext context, IHttpClientFactory factory, string path) => ProxyToAdapter(context, factory, $"dialogs/{path}"))
     .RequireAuthorization();
@@ -175,6 +181,8 @@ async Task ProxyToAdapter(HttpContext context, IHttpClientFactory factory, strin
     if (response.Headers.CacheControl?.NoStore == true) context.Response.Headers.CacheControl = "no-store";
     if (response.Headers.TryGetValues("X-Connection-Reused", out var reused))
         context.Response.Headers["X-Connection-Reused"] = reused.ToArray();
+    foreach (var header in new[] { "X-Resource-Revision", "X-List-Revision" })
+        if (response.Headers.TryGetValues(header, out var values)) context.Response.Headers[header] = values.ToArray();
     await response.Content.CopyToAsync(context.Response.Body, context.RequestAborted);
 }
 

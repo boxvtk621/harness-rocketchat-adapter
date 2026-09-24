@@ -3,6 +3,7 @@ using System.Text.Json;
 public sealed class HarnessObservationService(
     IConnectionRepository connections,
     IHarnessClient client,
+    IResourceRevisions revisions,
     ICentrifugoPublisher publisher,
     ILogger<HarnessObservationService> logger) : BackgroundService
 {
@@ -22,6 +23,9 @@ public sealed class HarnessObservationService(
         var now = DateTimeOffset.UtcNow;
         foreach (var connection in await connections.ListAsync(ct))
         {
+            var stale = ObservationSemantics.WithFreshness(connection.Observation, connection.Settings, now);
+            if (stale.HeartbeatFresh != connection.Observation.HeartbeatFresh)
+                await CommitAndPublishAsync(connection, stale, ct);
             if (connection.Observation.AttemptedAt is { } attempted &&
                 now - attempted < TimeSpan.FromSeconds(connection.Settings.IntervalSeconds)) continue;
             var epoch = connection.ConfigEpoch;
@@ -33,14 +37,36 @@ public sealed class HarnessObservationService(
                     connection.Id, ex.GetType().Name);
                 continue;
             }
-            if (!await connections.UpdateObservationAsync(connection.Id, epoch, result.Observation, ct))
-            {
-                logger.LogInformation("Discarded stale observation for connection {ConnectionId} epoch {ConfigEpoch}", connection.Id, epoch);
-                continue;
-            }
-            await publisher.PublishInvalidationAsync("nodes", connection.Id, "observed", ct);
-            await publisher.PublishInvalidationAsync("work", connection.Id, "refetch", ct);
-            await publisher.PublishInvalidationAsync("history", connection.Id, "refetch", ct);
+            await CommitAndPublishAsync(connection, ObservationSemantics.WithFreshness(result.Observation, connection.Settings,
+                DateTimeOffset.UtcNow), ct);
+        }
+    }
+
+    private async Task CommitAndPublishAsync(Connection connection, Observation observation, CancellationToken ct)
+    {
+        var before = ConnectionIdentity.Analyze(await connections.ListAsync(ct));
+        var committed = await connections.CommitObservationAsync(connection.Id, connection.ConfigEpoch, observation, ct);
+        if (!committed.Written || committed.Connection is null) return;
+        var after = ConnectionIdentity.Analyze(await connections.ListAsync(ct));
+        var affected = new HashSet<string>(StringComparer.Ordinal);
+        var identityChanged = false;
+        if (committed.Changed) affected.Add(connection.Id);
+        foreach (var (id, identity) in after)
+            if (!before.TryGetValue(id, out var previous) || previous.Status != identity.Status ||
+                !previous.ConflictingConnectionIds.SequenceEqual(identity.ConflictingConnectionIds))
+            { affected.Add(id); identityChanged = true; }
+        var listRevision = identityChanged
+            ? await revisions.AdvanceAsync("nodes", "*", 0, null,
+                $"identity:{connection.Id}:{committed.Connection.ObservationVersion}", ct)
+            : null;
+        foreach (var id in affected)
+        {
+            var item = id == connection.Id ? committed.Connection : await connections.GetAsync(id, ct);
+            if (item is null) continue;
+            if (id != connection.Id) item = await connections.AdvanceNodeRevisionAsync(id, item.ConfigEpoch, ct);
+            if (item is null) continue;
+            await publisher.PublishInvalidationAsync(new Invalidation(1, "nodes", id, item.Observation.NodeId,
+                item.ConfigEpoch, null, null, item.NodeRevision, "observed", listRevision), ct);
         }
     }
 }
@@ -48,10 +74,13 @@ public sealed class HarnessObservationService(
 public sealed class HarnessEventInvalidationService(
     IConnectionRepository connections,
     IHarnessClient client,
+    IResourceRevisions revisions,
+    IEventRelations relations,
+    IEventCursors cursors,
     ICentrifugoPublisher publisher,
     ILogger<HarnessEventInvalidationService> logger) : BackgroundService
 {
-    private sealed record Worker(long Epoch, string NodeId, CancellationTokenSource Stop, Task Task);
+    private sealed record Worker(long Epoch, string NodeId, string? BootId, CancellationTokenSource Stop, Task Task);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -72,7 +101,8 @@ public sealed class HarnessEventInvalidationService(
                 {
                     if (!current.TryGetValue(item.Key, out var connection) ||
                         connection.ConfigEpoch != item.Value.Epoch ||
-                        connection.Observation.NodeId != item.Value.NodeId || item.Value.Task.IsCompleted)
+                        connection.Observation.NodeId != item.Value.NodeId ||
+                        connection.Observation.BootId != item.Value.BootId || item.Value.Task.IsCompleted)
                     {
                         item.Value.Stop.Cancel();
                         workers.Remove(item.Key);
@@ -91,7 +121,8 @@ public sealed class HarnessEventInvalidationService(
                     if (workers.ContainsKey(connection.Id)) continue;
                     var stop = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
                     var task = RunAsync(connection, stop.Token);
-                    workers[connection.Id] = new(connection.ConfigEpoch, connection.Observation.NodeId!, stop, task);
+                    workers[connection.Id] = new(connection.ConfigEpoch, connection.Observation.NodeId!,
+                        connection.Observation.BootId, stop, task);
                 }
             }
             while (await timer.WaitForNextTickAsync(stoppingToken));
@@ -114,21 +145,14 @@ public sealed class HarnessEventInvalidationService(
             try
             {
                 if (after is null)
+                    after = await cursors.ReadAsync(connection, ct);
+                await foreach (var item in client.WatchDetailedEventsAsync(connection, after.Value, ct))
                 {
-                    using var snapshot = await client.GetAsync(connection,
-                        ["v1", "nodes", connection.Observation.NodeId!, "snapshot"], null, ct);
-                    if (snapshot is null || !snapshot.RootElement.TryGetProperty("lastEventSeq", out var last) ||
-                        !last.TryGetInt64(out var current) || current < 0)
-                        throw new InvalidDataException("Harness event cursor snapshot is unavailable.");
-                    after = current;
-                    await publisher.PublishInvalidationAsync("work", connection.Id, "event-stream-start", ct);
-                    await publisher.PublishInvalidationAsync("history", connection.Id, "event-stream-start", ct);
-                }
-                await foreach (var sequence in client.WatchEventsAsync(connection, after.Value, ct))
-                {
-                    after = sequence;
-                    await publisher.PublishInvalidationAsync("work", connection.Id, "event", ct);
-                    await publisher.PublishInvalidationAsync("history", connection.Id, "event", ct);
+                    if (item.Seq <= after.Value) continue;
+                    if (item.NodeId is null || item.NodeId == connection.Observation.NodeId)
+                        await PublishEventAsync(connection, item, ct);
+                    await cursors.AdvanceAsync(connection, item.Seq, ct);
+                    after = item.Seq;
                 }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
@@ -138,6 +162,74 @@ public sealed class HarnessEventInvalidationService(
                     connection.Id, ex.GetType().Name);
             }
             await Task.Delay(TimeSpan.FromSeconds(1), ct);
+        }
+    }
+
+    private async Task PublishEventAsync(Connection connection, HarnessEvent item, CancellationToken ct)
+    {
+        if (item.Type is null) return;
+        var type = item.Type;
+        var resources = new List<(string Resource, string? Entity, string Kind)>();
+        var requestId = item.RequestId ?? (type.StartsWith("request.", StringComparison.Ordinal) ? item.EntityId : null);
+        if (item.AttemptId is { } attemptId)
+        {
+            if (requestId is not null)
+                await relations.RememberAsync(connection.Id, connection.ConfigEpoch, attemptId, requestId, ct);
+            else requestId = await relations.RequestAsync(connection.Id, connection.ConfigEpoch, attemptId, ct);
+            if (requestId is null)
+            {
+                using var readback = await client.GetAsync(connection,
+                    ["v1", "nodes", connection.Observation.NodeId!, "attempts", attemptId], null, ct);
+                if (readback is { } document && document.RootElement.TryGetProperty("attempt", out var found) &&
+                    found.ValueKind == JsonValueKind.Object &&
+                    found.TryGetProperty("attemptId", out var foundId) && foundId.ValueKind == JsonValueKind.String &&
+                    foundId.GetString() == attemptId &&
+                    found.TryGetProperty("requestId", out var foundRequest) && foundRequest.ValueKind == JsonValueKind.String &&
+                    Guid.TryParseExact(foundRequest.GetString(), "D", out _))
+                {
+                    requestId = foundRequest.GetString();
+                    await relations.RememberAsync(connection.Id, connection.ConfigEpoch, attemptId, requestId!, ct);
+                }
+            }
+        }
+        var dialogId = item.DialogId ?? (type.StartsWith("dialog.", StringComparison.Ordinal) ? item.EntityId : null);
+        if (type.StartsWith("request.", StringComparison.Ordinal) || type.StartsWith("attempt.", StringComparison.Ordinal) ||
+            type == "queue.changed" || type == "message.accepted")
+        {
+            if (requestId is not null || type == "queue.changed") resources.Add(("work", requestId, type));
+            if ((type is "request.completed" or "request.failed" or "request.cancelled" or "request.interrupted" or
+                "attempt.completed" or "attempt.failed" or "attempt.interrupted" or "attempt.unknown") && requestId is not null)
+                resources.Add(("history", requestId, type));
+        }
+        if (dialogId is not null && (type.StartsWith("dialog.", StringComparison.Ordinal) ||
+            type.StartsWith("message.", StringComparison.Ordinal) || type.StartsWith("assistant.", StringComparison.Ordinal) ||
+            type.StartsWith("tool.", StringComparison.Ordinal) || type.StartsWith("attempt.", StringComparison.Ordinal)))
+            resources.Add(("dialogs", dialogId, type));
+        if (requestId is not null && (type.StartsWith("message.", StringComparison.Ordinal) ||
+            type.StartsWith("assistant.", StringComparison.Ordinal) || type.StartsWith("tool.", StringComparison.Ordinal)))
+            resources.Add(("history", requestId, type));
+        foreach (var (resource, entity, kind) in resources.Distinct())
+        {
+            var marker = $"{connection.Observation.BootId}:{item.Seq}:{resource}:{entity}";
+            var membership = entity is null || resource switch
+            {
+                "work" => kind is "request.created" or "request.cancelled" or "request.completed" or
+                    "request.failed" or "request.interrupted" or "attempt.completed" or "attempt.failed" or
+                    "attempt.interrupted" or "attempt.unknown" or "message.accepted",
+                "history" => kind is "request.completed" or "request.failed" or "request.cancelled" or
+                    "request.interrupted" or "attempt.completed" or "attempt.failed" or "attempt.interrupted" or "attempt.unknown",
+                "dialogs" => kind is "dialog.created" or "dialog.deleted" or "dialog.updated",
+                _ => false
+            };
+            var listRevision = membership
+                ? await revisions.AdvanceAsync(resource, connection.Id, connection.ConfigEpoch, null, marker, ct)
+                : await revisions.ReadAsync(resource, connection.Id, connection.ConfigEpoch, null, ct);
+            var revision = entity is null ? listRevision :
+                await revisions.AdvanceAsync(resource, connection.Id, connection.ConfigEpoch, entity, marker, ct);
+            if (revision is null) continue;
+            await publisher.PublishInvalidationAsync(new Invalidation(1, resource, connection.Id,
+                connection.Observation.NodeId, connection.ConfigEpoch, entity, null, revision.Value, kind,
+                listRevision), ct);
         }
     }
 }

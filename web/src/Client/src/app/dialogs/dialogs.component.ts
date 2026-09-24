@@ -80,10 +80,12 @@ export class DialogsComponent implements OnChanges, OnDestroy {
   @Input({ required: true }) sessionKey = '';
   @Input({ required: true }) nodes: DialogNodeProjection[] = [];
   @Input() refreshVersion = 0;
+  @Input() invalidation: { connectionId: string; nodeId?: string | null; configEpoch: number; entityId?: string | null; revision: number; kind: string } | null = null;
   @Input() navigationTarget: { connectionId: string; nodeId: string; dialogId: string; requestId: string | null; nonce: number } | null = null;
 
   @Output() readonly settingsRequested = new EventEmitter<string>();
   @Output() readonly sessionExpired = new EventEmitter<void>();
+  @Output() readonly synced = new EventEmitter<string>();
 
   @ViewChild('historyViewport') private historyViewport?: ElementRef<HTMLElement>;
 
@@ -180,9 +182,20 @@ export class DialogsComponent implements OnChanges, OnDestroy {
       if (!this.nodes.some(node => node.connectionId === this.createNodeConnectionId)) {
         this.createNodeConnectionId = this.nodes.find(node => !!this.nodeId(node))?.connectionId ?? '';
       }
-      void this.loadDialogs(false);
+      const before = changes['nodes'].previousValue as DialogNodeProjection[] | undefined;
+      const contextKey = (items: DialogNodeProjection[]) => items.map(node =>
+        `${node.connectionId}:${node.observation?.nodeId || ''}:${node.configEpoch}`).sort().join('|');
+      if (!before || contextKey(before) !== contextKey(this.nodes)) void this.loadDialogs(false);
+      else {
+        const names = new Map(this.nodes.map(node => [node.connectionId, node.name]));
+        this.dialogs.update(current => current.map(row => {
+          const name = names.get(row.connectionId);
+          return name && name !== row.nodeName ? { ...row, nodeName: name } : row;
+        }));
+      }
     }
     if (changes['refreshVersion'] && !changes['refreshVersion'].firstChange) this.scheduleInvalidationReadback();
+    if (changes['invalidation'] && this.invalidation?.entityId) void this.refreshExactDialog(this.invalidation);
     if (changes['navigationTarget'] && this.navigationTarget) void this.applyNavigationTarget();
   }
 
@@ -269,6 +282,7 @@ export class DialogsComponent implements OnChanges, OnDestroy {
     this.listError.set(errors.join(' '));
     this.listLoading.set(false);
     this.freshnessAt.set(new Date().toISOString());
+    this.synced.emit(this.freshnessAt()!);
 
     if (this.navigationTarget && this.navigationTarget.nonce !== this.appliedNavigationNonce) void this.applyNavigationTarget();
     else if (preserveSelection && this.selectedDialog()) void this.refreshSelectedDialog(true);
@@ -381,6 +395,7 @@ export class DialogsComponent implements OnChanges, OnDestroy {
       this.historyCursorInitialized = true;
       this.requestNextCursor.set(requestPage.nextCursor);
       this.freshnessAt.set(new Date().toISOString());
+      this.synced.emit(this.freshnessAt()!);
       this.historyLoading.set(false);
 
       const openedRequestId = this.selectedRequestId();
@@ -1211,6 +1226,33 @@ export class DialogsComponent implements OnChanges, OnDestroy {
     this.refreshTimer = window.setTimeout(() => {
       void this.loadDialogs(true);
     }, 180);
+  }
+
+  private async refreshExactDialog(event: NonNullable<DialogsComponent['invalidation']>): Promise<void> {
+    const context = this.nodeContexts().find(item => item.connectionId === event.connectionId &&
+      item.nodeId === event.nodeId && item.configEpoch === event.configEpoch);
+    if (!context || !event.entityId || !this.accessToken) return;
+    const session = this.sessionGeneration;
+    const key = `${context.nodeId}:${event.entityId}`;
+    try {
+      const [dialog, snapshot] = await Promise.all([
+        this.get<HarnessDialog>(this.route(context, `dialogs/${encodeURIComponent(event.entityId)}`), context.configEpoch, { view: 'activity' }),
+        this.snapshots()[context.connectionId]
+          ? Promise.resolve(this.snapshots()[context.connectionId])
+          : this.get<HarnessSnapshot>(this.route(context, 'snapshot'), context.configEpoch)
+      ]);
+      if (session !== this.sessionGeneration || this.invalidation !== event) return;
+      const row = this.dialogRow(context, dialog, snapshot);
+      this.dialogs.set(this.mergeDialogs(this.dialogs(), [row]));
+      this.freshnessAt.set(new Date().toISOString());
+      this.synced.emit(this.freshnessAt()!);
+      if (this.selectedDialogId() === key) await this.refreshSelectedDialog(true);
+    } catch (failure) {
+      if (session !== this.sessionGeneration || this.invalidation !== event) return;
+      if (this.failure(failure).status === 404) {
+        this.dialogs.update(current => current.filter(row => this.dialogKey(row) !== key));
+      }
+    }
   }
 
   private nodeContexts(): NodeReadContext[] {

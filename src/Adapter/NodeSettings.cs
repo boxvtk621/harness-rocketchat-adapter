@@ -2,6 +2,8 @@ using System.Net.Http.Headers;
 using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Security.Cryptography;
 
 public sealed record NodeSettingsResult(int Status, JsonElement? Payload = null, string? Code = null);
 
@@ -62,7 +64,9 @@ public sealed class NodeSettingsClient(HttpClient http, HarnessAddressPolicy add
                 var safeConfiguredFlag = property.Value.ValueKind is JsonValueKind.True or JsonValueKind.False &&
                     normalized is "bearertokenconfigured" or "tokenconfigured" or "secretconfigured" or
                         "passwordconfigured" or "credentialconfigured" or "credentialsconfigured" or "apikeyconfigured";
-                if (!safeConfiguredFlag && (normalized.Contains("secret", StringComparison.Ordinal) ||
+                var safeSecretAction = normalized == "secretaction" && property.Value.ValueKind == JsonValueKind.String &&
+                    property.Value.GetString() is "keep" or "replace" or "remove";
+                if (!safeConfiguredFlag && !safeSecretAction && (normalized.Contains("secret", StringComparison.Ordinal) ||
                     normalized.Contains("password", StringComparison.Ordinal) ||
                     normalized.Contains("credential", StringComparison.Ordinal) ||
                     normalized.Contains("authorization", StringComparison.Ordinal) ||
@@ -112,7 +116,7 @@ public static class NodeSettingsEndpoints
             (string id, HttpContext context, IConnectionRepository store, INodeSettingsClient client,
                 ICentrifugoPublisher publisher, ConnectionDispatchFence fence, CancellationToken ct) =>
                 Dispatch(id, ["model-catalog"], context, store, client, publisher, fence, ct));
-        foreach (var action in new[] { "mcp-checks", "apply" })
+        foreach (var action in new[] { "mcp-checks", "mcp-validate", "apply" })
             connections.MapPost("/{id}/node-settings/" + action,
                 (string id, HttpContext context, IConnectionRepository store, INodeSettingsClient client,
                     ICentrifugoPublisher publisher, ConnectionDispatchFence fence, CancellationToken ct) =>
@@ -177,8 +181,45 @@ public static class NodeSettingsEndpoints
         var currentIdentities = ConnectionIdentity.Analyze(await store.ListAsync(ct));
         if (!currentIdentities.TryGetValue(id, out var currentIdentity) || currentIdentity.Status != ConnectionIdentity.Unique)
             return Results.Conflict(new { code = "node_id_conflict" });
-        if (!HttpMethods.IsGet(context.Request.Method) && result.Status is >= 200 and < 300)
-            await publisher.PublishInvalidationAsync("nodes", id, "node_settings", ct);
+        if (result.Payload is { } value && value.ValueKind == JsonValueKind.Object)
+        {
+            var revisions = context.RequestServices.GetRequiredService<IResourceRevisions>();
+            var operation = value.TryGetProperty("operation", out var op) && op.ValueKind == JsonValueKind.Object ? op : default;
+            var operationId = operation.ValueKind == JsonValueKind.Object && operation.TryGetProperty("operationId", out var opId)
+                ? opId.GetString() : null;
+            if (!HttpMethods.IsGet(context.Request.Method) && suffix.FirstOrDefault() is not ("mcp-validate" or "model-catalog") && result.Status is >= 200 and < 300)
+            {
+                var draft = value.TryGetProperty("draftRevision", out var draftValue) && draftValue.TryGetInt64(out var d) ? d : 0;
+                var applied = value.TryGetProperty("appliedRevision", out var appliedValue) && appliedValue.TryGetInt64(out var a) ? a : 0;
+                var status = operation.ValueKind == JsonValueKind.Object && operation.TryGetProperty("status", out var statusValue)
+                    ? statusValue.GetString() : null;
+                var phase = operation.ValueKind == JsonValueKind.Object && operation.TryGetProperty("phase", out var phaseValue)
+                    ? phaseValue.GetString() : null;
+                var observations = value.TryGetProperty("observations", out var observed) && observed.ValueKind == JsonValueKind.Array
+                    ? string.Join(';', observed.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.Object).Select(x => string.Join(':',
+                        x.TryGetProperty("kind", out var k) && k.ValueKind == JsonValueKind.String ? k.GetString() : "",
+                        x.TryGetProperty("state", out var s) && s.ValueKind == JsonValueKind.String ? s.GetString() : "",
+                        x.TryGetProperty("reasonCode", out var r) && r.ValueKind == JsonValueKind.String ? r.GetString() : ""))) : "";
+                var observationDigest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(observations)));
+                var marker = $"{draft}:{applied}:{operationId}:{status}:{phase}:{observationDigest}";
+                var revision = await revisions.AdvanceAsync("node_settings", id, epoch, nodeId, marker, ct);
+                if (revision is not null)
+                    await publisher.PublishInvalidationAsync(new Invalidation(1, "node_settings", id, nodeId,
+                        epoch, nodeId, operationId, revision.Value, "changed"), ct);
+                if (suffix.FirstOrDefault() == "apply" && status == "pending" && ProviderAuthClient.ExactId(operationId))
+                    await context.RequestServices.GetRequiredService<IOperationWatches>()
+                        .RegisterAsync("node_settings", current, nodeId, operationId!, ct);
+            }
+            var resourceRevision = await revisions.ReadAsync("node_settings", id, epoch, nodeId, ct);
+            var enriched = JsonNode.Parse(value.GetRawText())!.AsObject();
+            enriched["resourceRevision"] = resourceRevision;
+            enriched["lastObservedAt"] = current.Observation.AttemptedAt?.ToString("O");
+            enriched["syncedAt"] = DateTimeOffset.UtcNow.ToString("O");
+            if (ProviderAuthClient.ExactId(operationId))
+                enriched["operationObservationStatus"] = await context.RequestServices.GetRequiredService<IOperationWatches>()
+                    .StatusAsync("node_settings", id, epoch, operationId!, ct);
+            return Results.Json(enriched, statusCode: result.Status);
+        }
         return result.Payload is { } payload ? Results.Json(payload, statusCode: result.Status)
             : Results.Json(new { code = result.Code }, statusCode: result.Status);
     }

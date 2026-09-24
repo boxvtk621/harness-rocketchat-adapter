@@ -18,7 +18,9 @@ public sealed record ProviderAuthOperation(string OperationId, string CommandId,
     DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, string? ReasonCode,
     string? VerificationUrl, string? UserCode, DateTimeOffset? ExpiresAt, DateTimeOffset? TimeoutAt);
 public sealed record ProviderAuthSnapshot(string SchemaId, string NodeId, long Revision, string State,
-    DateTimeOffset? CheckedAt, string? ReasonCode, ProviderAuthCapabilities Capabilities, ProviderAuthOperation? Operation);
+    DateTimeOffset? CheckedAt, string? ReasonCode, ProviderAuthCapabilities Capabilities, ProviderAuthOperation? Operation,
+    long ResourceRevision = 0, DateTimeOffset? LastObservedAt = null, DateTimeOffset? SyncedAt = null,
+    string? OperationObservationStatus = null);
 public sealed record ProviderAuthResult(int Status, ProviderAuthSnapshot? Snapshot = null, string? Code = null);
 
 public interface IProviderAuthClient
@@ -147,8 +149,27 @@ public static class ProviderAuthEndpoints
         var current = await store.GetAsync(id, ct);
         if (current?.ConfigEpoch != epoch || current.Observation.NodeId != nodeId)
             return Results.Conflict(new { code = "connection_changed" });
-        if (input is not null)
-            await publisher.PublishInvalidationAsync("nodes", id, "provider_auth", ct);
+        if (result.Snapshot is { } snapshot)
+        {
+            var revisions = context.RequestServices.GetRequiredService<IResourceRevisions>();
+            if (input is not null && result.Status is >= 200 and < 300)
+            {
+                var marker = $"{snapshot.Revision}:{snapshot.State}:{snapshot.Operation?.OperationId}:{snapshot.Operation?.Status}";
+                var revision = await revisions.AdvanceAsync("provider_auth", id, epoch, nodeId, marker, ct);
+                if (revision is not null)
+                    await publisher.PublishInvalidationAsync(new Invalidation(1, "provider_auth", id, nodeId,
+                        epoch, nodeId, snapshot.Operation?.OperationId, revision.Value, "changed"), ct);
+                if (snapshot.Operation is { Status: "pending" } operation)
+                    await context.RequestServices.GetRequiredService<IOperationWatches>()
+                        .RegisterAsync("provider_auth", current, nodeId!, operation.OperationId, ct);
+            }
+            var resourceRevision = await revisions.ReadAsync("provider_auth", id, epoch, nodeId, ct);
+            var watchStatus = snapshot.Operation is null ? null : await context.RequestServices.GetRequiredService<IOperationWatches>()
+                .StatusAsync("provider_auth", id, epoch, snapshot.Operation.OperationId, ct);
+            return Results.Json(snapshot with { ResourceRevision = resourceRevision,
+                LastObservedAt = current.Observation.AttemptedAt, SyncedAt = DateTimeOffset.UtcNow,
+                OperationObservationStatus = watchStatus }, statusCode: result.Status);
+        }
         return result.Snapshot is not null ? Results.Json(result.Snapshot, statusCode: result.Status)
             : Results.Json(new { code = result.Code }, statusCode: result.Status);
     }

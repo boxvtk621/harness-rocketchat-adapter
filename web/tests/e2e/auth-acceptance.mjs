@@ -54,7 +54,7 @@ async function control(status, operationId) {
 }
 async function select(page, id, section = 'nodes') {
   await page.getByTestId('nav-' + section).click();
-  await page.getByTestId('node-row-' + id).getByRole('button').click();
+  await page.getByTestId('node-row-' + id).click();
   await page.getByTestId('provider-auth-state').waitFor();
 }
 const evidence = { type: 'controlled-provider-through-real-Adapter-Gateway-Keycloak', realProviderLogin: false, checks: [] };
@@ -189,7 +189,7 @@ try {
   assert.equal((await api(observer, 'POST', route + '/logout' + suffix, { nodeId, commandId: randomUUID() })).status(), 403);
   assert.equal((await api(observer, 'POST', '/api/connections', { name: 'denied', baseUri: 'https://auth-fixture:8443/fixture' })).status(), 403);
   await observer.getByTestId('nav-nodes').click();
-  await observer.getByTestId('node-row-' + connection.id).getByRole('button').click();
+  await observer.getByTestId('node-row-' + connection.id).click();
   await observer.getByText('Доступно пользователям с правом управления подключениями.').waitFor();
   assert.equal(await observer.getByTestId('provider-secret').count(), 0);
   await observer.screenshot({ path: output + '/auth-observer-qhd.png', fullPage: true });

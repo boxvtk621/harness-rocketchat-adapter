@@ -222,7 +222,11 @@ public sealed class DialogsTests
             builder.ConfigureServices(s =>
             {
                 s.RemoveAll<IConnectionRepository>(); s.RemoveAll<ICentrifugoPublisher>(); s.RemoveAll<IHostedService>(); s.RemoveAll<IDialogHarnessClient>();
+                s.RemoveAll<IResourceRevisions>(); s.RemoveAll<IOperationWatches>(); s.RemoveAll<IEventRelations>(); s.RemoveAll<IEventCursors>();
                 s.AddSingleton<IConnectionRepository, MemoryConnectionRepository>(); s.AddSingleton<ICentrifugoPublisher, NoopPublisher>(); s.AddSingleton<IDialogHarnessClient>(Relay);
+                s.AddSingleton<IResourceRevisions, MemoryResourceRevisions>(); s.AddSingleton<IOperationWatches, MemoryOperationWatches>();
+                s.AddSingleton<IEventRelations, MemoryEventRelations>();
+                s.AddSingleton<IEventCursors, MemoryEventCursors>();
             });
         }
     }

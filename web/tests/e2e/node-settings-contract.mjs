@@ -6,12 +6,19 @@ const actual = buildNodeSettingsPutPayload(
   nodeSettingsPutFixture.input.expectedRevision,
   nodeSettingsPutFixture.input.draft
 );
+const servers = actual.draft.mcpDocument.servers;
+assert.equal(actual.expectedRevision, 8);
+assert.equal(actual.draft.mcpDocument.schemaId, 'harness-mcp-document-v2');
+assert.equal(servers[0].transport, 'streamable_http');
+assert.equal(servers[3].transport, 'stdio', 'serializer must never force a transport');
+assert.equal(JSON.stringify(actual).includes('bearerTokenConfigured'), false, 'GET-only status must not be sent');
+assert.equal(JSON.stringify(actual).includes('configured'), true, 'stable server ID remains');
+assert.equal(servers[0].auth.secretAction, 'remove');
+assert.equal(servers[0].auth.secret, undefined);
+assert.equal(servers[1].auth.secretAction, 'keep');
+assert.equal(servers[1].auth.secret, undefined);
+assert.equal(servers[2].auth.secret, 'fixture-replacement');
+assert.deepEqual(servers[3].secretSlots, [{ slot: 'TOKEN', action: 'keep' }]);
+assert.equal(nodeSettingsPutFixture.input.draft.mcpDocument.servers[1].auth.secret, 'discard-me', 'input remains untouched');
 
-assert.deepEqual(actual, nodeSettingsPutFixture.expected, 'PUT payload must contain only Harness input fields and exact secret actions.');
-assert.equal(JSON.stringify(actual).includes('bearerTokenConfigured'), false, 'Output-only configured flags must never be sent.');
-assert.equal(actual.draft.mcpServers[0].auth.secretAction, 'remove');
-assert.equal(actual.draft.mcpServers[1].auth.secretAction, 'keep');
-assert.equal(actual.draft.mcpServers[2].auth.secretAction, 'replace');
-assert.equal(actual.draft.mcpServers[2].auth.secret, 'fixture-replacement');
-
-console.log('node-settings PUT contract fixture: passed');
+console.log('PASS V2 MCP transport and secret action serialization');

@@ -169,7 +169,28 @@ public static class DialogEndpoints
         {
             var projected = DialogPublicDto.Project(nodeId, parts, query, body, command);
             if (projected is null) return Error(502, writing ? "command_outcome_unknown" : "invalid_public_dto");
-            if (writing) await publisher.PublishInvalidationAsync("dialogs", connectionId, "refetch", ct);
+            var revisions = context.RequestServices.GetRequiredService<IResourceRevisions>();
+            var dialogId = parts.Length > 1 && parts[0] == "dialogs" ? parts[1] : null;
+            if (writing && command is { } cmd)
+            {
+                var target = cmd.GetProperty("target");
+                dialogId = target.TryGetProperty("dialogId", out var d) ? d.GetString() :
+                    projected.Value.TryGetProperty("references", out var refs) && refs.TryGetProperty("dialogId", out var created) ? created.GetString() : null;
+                if (dialogId is not null)
+                {
+                    var listRevision = await revisions.AdvanceAsync("dialogs", connectionId, epoch, null,
+                        $"command:{cmd.GetProperty("commandId").GetString()}", ct);
+                    var revision = await revisions.AdvanceAsync("dialogs", connectionId, epoch, dialogId,
+                        $"command:{cmd.GetProperty("commandId").GetString()}", ct);
+                    if (revision is not null)
+                        await publisher.PublishInvalidationAsync(new Invalidation(1, "dialogs", connectionId, nodeId,
+                            epoch, dialogId, null, revision.Value, "command", listRevision), ct);
+                }
+            }
+            var resourceRevision = await revisions.ReadAsync("dialogs", connectionId, epoch, dialogId, ct);
+            var currentListRevision = await revisions.ReadAsync("dialogs", connectionId, epoch, null, ct);
+            context.Response.Headers["X-Resource-Revision"] = resourceRevision.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            context.Response.Headers["X-List-Revision"] = currentListRevision.ToString(System.Globalization.CultureInfo.InvariantCulture);
             return Results.Json(projected.Value, statusCode: reply.StatusCode);
         }
         var code = reply.StatusCode switch

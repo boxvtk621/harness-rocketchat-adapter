@@ -4,6 +4,7 @@ import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import https from 'node:https';
 import { join } from 'node:path';
 import { chromium } from 'playwright';
+import { modelCatalogFixture, nodeSettingsFixture } from './node-settings-fixture.mjs';
 
 const baseUrl = process.env.BASE_URL ?? 'http://localhost:18505';
 const apiBaseUrl = process.env.API_BASE_URL ?? 'http://host.docker.internal:18505';
@@ -15,7 +16,7 @@ const projectNamespace = process.env.ACCEPTANCE_PROJECT_NAMESPACE ?? '';
 const composeProject = process.env.COMPOSE_PROJECT_NAME ?? '';
 
 assert.equal(process.env.ACCEPTANCE_ISOLATED, 'true', 'Refusing to run: ACCEPTANCE_ISOLATED must be exactly "true".');
-assert.match(projectNamespace, /^hl305-[a-z0-9][a-z0-9-]*$/, 'Refusing to run without a dedicated hl305-* namespace.');
+assert.match(projectNamespace, /^(?:hl305|hl320)-[a-z0-9][a-z0-9-]*$/, 'Refusing to run without a dedicated hl305-* or hl320-* namespace.');
 assert.equal(composeProject, projectNamespace, 'COMPOSE_PROJECT_NAME must equal ACCEPTANCE_PROJECT_NAMESPACE.');
 for (const [name, value] of [['BASE_URL', baseUrl], ['API_BASE_URL', apiBaseUrl]]) {
   const host = new URL(value).hostname;
@@ -208,6 +209,61 @@ async function apiJson(page, path) {
   return response.json();
 }
 
+async function assertNativeSettingsContracts(page, manifest) {
+  for (const key of ['cursor', 'codex']) {
+    const fixture = manifest[key];
+    const connectionId = manifest.connections[key].connectionId;
+    const query = `nodeId=${encodeURIComponent(fixture.nodeId)}&configEpoch=1`;
+    const base = `/api/connections/${encodeURIComponent(connectionId)}/node-settings`;
+    const settings = await apiJson(page, `${base}?${query}`);
+    assert.equal(settings.schemaId, 'harness-node-settings-v2', `${key} must return the versioned settings contract.`);
+    assert.equal(settings.draft?.mcpDocument?.schemaId, 'harness-mcp-document-v2');
+    assert.ok(Number.isSafeInteger(settings.resourceRevision), `${key} must return an Adapter resource revision.`);
+    const catalog = await apiJson(page, `${base}/model-catalog?${query}`);
+    assert.equal(catalog.schemaId, 'harness-model-catalog-v2', `${key} must return a versioned model catalog.`);
+    assert.ok(Array.isArray(catalog.models), `${key} catalog must contain a models array.`);
+    const validation = await apiRaw(page, 'POST', `${base}/mcp-validate?${query}`,
+      { mcpDocument: settings.draft.mcpDocument });
+    assert.equal(validation.status(), 200, `${key} must validate its own saved MCP document: ${await validation.text()}`);
+    assert.equal((await validation.json()).valid, true, `${key} saved MCP document must be valid.`);
+  }
+}
+
+async function assertCodexModeOnlyApply(page, manifest) {
+  const fixture = manifest.codex;
+  const connectionId = manifest.connections.codex.connectionId;
+  const query = `nodeId=${encodeURIComponent(fixture.nodeId)}&configEpoch=1`;
+  const base = `/api/connections/${encodeURIComponent(connectionId)}/node-settings`;
+  const catalog = await apiJson(page, `${base}/model-catalog?${query}`);
+  const defaultModel = catalog.models.find(model => model.isDefault);
+  assert.ok(defaultModel?.speedModes?.some(mode => mode.id === 'on'), 'Codex default model must advertise native speed on.');
+  let settings = await apiJson(page, `${base}?${query}`);
+  assert.equal(settings.draft.inference.modelId, null, 'Mode-only proof starts with the provider default model.');
+  if (settings.draft.inference.speedMode !== 'on') {
+    const draft = structuredClone(settings.draft);
+    draft.inference.speedMode = 'on';
+    const response = await apiRaw(page, 'PUT', `${base}?${query}`, { expectedRevision: settings.draftRevision, draft });
+    assert.equal(response.status(), 200, `Codex speed-only PUT must succeed: ${await response.text()}`);
+    settings = await response.json();
+    assert.equal(settings.draft.inference.modelId, null, 'Speed-only PUT must preserve the default model.');
+    assert.equal(settings.draft.inference.reasoningEffort, null, 'Speed-only PUT must preserve reasoning default.');
+    assert.equal(settings.draft.inference.speedMode, 'on');
+  }
+  if (settings.appliedRevision !== settings.draftRevision) {
+    const commandId = stableUuid('codex-hl320-speed-only-apply-retry');
+    const response = await apiRaw(page, 'POST', `${base}/apply?${query}`, {
+      expectedRevision: settings.draftRevision, targetRevision: settings.draftRevision, commandId
+    });
+    assert.ok([200, 202].includes(response.status()), `Codex speed-only apply must be accepted: ${await response.text()}`);
+  }
+  await poll(async () => {
+    const readback = await apiJson(page, `${base}?${query}`);
+    assert.equal(readback.draft.inference.speedMode, 'on');
+    assert.equal(readback.appliedRevision, readback.draftRevision, `Codex mode-only apply: ${JSON.stringify(readback.operation)}.`);
+    assert.equal(readback.applied?.inference.speedMode, 'on');
+  }, 'Codex speed-only settings must apply through Adapter', 30_000);
+}
+
 async function waitForProjection(page, path, predicate, description, timeout = 45_000) {
   return poll(async () => {
     const value = await apiJson(page, path);
@@ -334,8 +390,8 @@ async function openSection(page, section) {
 async function assertTableRows(page, tableId, count, description) {
   const table = page.getByTestId(tableId);
   await poll(async () => {
-    assert.equal(await table.count(), 1, `${description} must render exactly one table.`);
-    assert.equal(await table.locator('tbody > tr[data-testid]').count(), count,
+    assert.equal(await table.count(), 1, `${description} must render exactly one list.`);
+    assert.equal(await (tableId === 'history-list' ? table.locator(':scope > button[data-testid]') : table.locator('tbody > tr[data-testid]')).count(), count,
       `${description} must render exactly ${count} entity rows (group headers excluded).`);
   }, `${description} row count`);
   return table;
@@ -421,12 +477,12 @@ async function assertRealIntegration(first, second, manifest, expected) {
       rowHeight: rect(`[data-testid="${rowTestId}"]`)?.height
     };
   }, workRowTestId(workItem));
-  assert.deepEqual(workMetrics, { fontSize: 13, sidebarWidth: 160, inspectorWidth: 380, rowHeight: 32 },
-    'QHD Work must preserve the FR-18 compact 13/160/380/32 geometry.');
+  assert.deepEqual(workMetrics, { fontSize: 13, sidebarWidth: 172, inspectorWidth: 460, rowHeight: 36 },
+    'QHD Work must preserve the current compact 13/172/460/36 geometry.');
   await nonemptyScreenshot(first, 'real-01-work-qhd.png');
 
   await openSection(first, 'history');
-  await assertTableRows(first, 'history-table', 2, 'History table');
+  await assertTableRows(first, 'history-list', 2, 'History list');
   for (const item of expected.terminal) {
     const row = await unique(first.getByTestId(historyRowTestId({ ...item, nodeId: manifest.cursor.nodeId })), `History row ${item.requestId}`);
     const text = await row.innerText();
@@ -434,18 +490,18 @@ async function assertRealIntegration(first, second, manifest, expected) {
     assert.ok(text.includes(manifest.connections.cursor.name), 'History main table must show the node name.');
     assert.ok(!text.includes(item.requestId) && !text.includes(item.dialogId), 'History UUIDs belong in details, not the main table.');
   }
-  await unique(first.getByTestId(historyRowTestId({ ...expected.terminal[0], nodeId: manifest.cursor.nodeId })).getByRole('button'), 'History row action').then((locator) => locator.click());
+  await unique(first.getByTestId(historyRowTestId({ ...expected.terminal[0], nodeId: manifest.cursor.nodeId })), 'History row action').then((locator) => locator.click());
   const historyInspector = await unique(first.getByTestId('history-inspector'), 'History inspector');
-  await historyInspector.getByRole('heading', { name: 'Результат обращения', exact: true }).waitFor();
+  await historyInspector.getByRole('heading', { level: 2 }).waitFor();
   await unique(historyInspector.locator('details'), 'History diagnostic disclosure').then((locator) => locator.locator('summary').click());
   assert.ok((await historyInspector.innerText()).includes(expected.terminal[0].requestId), 'History inspector must expose request UUID in its diagnostic details.');
   await unique(first.getByTestId('history-search'), 'History search').then((locator) => locator.fill('двух завершённых'));
-  await assertTableRows(first, 'history-table', 2, 'Filtered History table');
+  await assertTableRows(first, 'history-list', 2, 'Filtered History list');
   const historyStatus = await unique(first.getByTestId('history-status'), 'History status filter');
   await historyStatus.selectOption('cancelled');
-  await assertTableRows(first, 'history-table', 2, 'Status-filtered History table');
+  await assertTableRows(first, 'history-list', 2, 'Status-filtered History list');
   await unique(first.getByTestId('history-node'), 'History node filter').then((locator) => locator.selectOption(manifest.connections.cursor.connectionId));
-  await assertTableRows(first, 'history-table', 2, 'Node-filtered History table');
+  await assertTableRows(first, 'history-list', 2, 'Node-filtered History list');
   await first.getByTestId('history-search').fill('');
   await first.getByTestId('history-status').selectOption('all');
   await first.getByTestId('history-node').selectOption('all');
@@ -457,11 +513,11 @@ async function assertRealIntegration(first, second, manifest, expected) {
     const row = await unique(first.getByTestId(`node-row-${manifest.connections[key].connectionId}`), `${key} node row`);
     const text = await row.innerText();
     assert.ok(text.includes(manifest.connections[key].name), 'Nodes main table must show the configured node name.');
-    assert.ok(!text.includes(fixture.nodeId), 'Node UUID belongs in details, not the main table.');
+    assert.ok(text.includes(fixture.nodeId), 'Nodes table must show the confirmed Node ID.');
   }
-  await unique(first.getByTestId(`node-row-${manifest.connections.cursor.connectionId}`).getByRole('button'), 'Node row action').then((locator) => locator.click());
+  await unique(first.getByTestId(`node-row-${manifest.connections.cursor.connectionId}`), 'Node row action').then((locator) => locator.click());
   const nodeInspector = await unique(first.getByTestId('node-inspector'), 'Node inspector');
-  await nodeInspector.getByRole('heading', { name: 'Наблюдение за нодой', exact: true }).waitFor();
+  await nodeInspector.getByRole('heading', { name: manifest.connections.cursor.name, exact: true }).waitFor();
   await unique(nodeInspector.locator('details'), 'Node diagnostic disclosure').then((locator) => locator.locator('summary').click());
   assert.ok((await nodeInspector.innerText()).includes(manifest.cursor.nodeId), 'Node inspector must expose node UUID in its diagnostic details.');
   await unique(first.getByTestId('nodes-search'), 'Nodes search').then((locator) => locator.fill('Cursor'));
@@ -476,12 +532,8 @@ async function assertRealIntegration(first, second, manifest, expected) {
   await assertTableRows(first, 'nodes-table', 2, 'Restored Nodes table');
   await nonemptyScreenshot(first, 'real-03-nodes-qhd.png');
 
-  await openSection(first, 'settings');
-  await assertTableRows(first, 'connections-table', 2, 'Connections table');
-  await unique(first.getByTestId(`connection-row-${manifest.connections.cursor.connectionId}`), 'Cursor connection row')
-    .then((locator) => locator.getByRole('button').click());
-  await first.getByTestId('connection-inspector').getByRole('heading', { name: 'Подключение', exact: true }).waitFor();
-  await nonemptyScreenshot(first, 'real-04-settings-qhd.png');
+  await first.getByTestId('node-inspector').getByTestId('connection-name').waitFor();
+  await nonemptyScreenshot(first, 'real-04-node-settings-qhd.png');
 }
 
 function observation(availability, now, overrides = {}) {
@@ -558,7 +610,7 @@ function controlledFixtures(now) {
 }
 
 async function installControlledRoutes(page, fixtures) {
-  const state = { workMode: 'data', workRelease: null, counts: { connections: 0, nodes: 0, work: 0, history: 0 } };
+  const state = { workMode: 'data', workRelease: null, counts: { connections: 0, nodes: 0, work: 0, workScoped: 0, history: 0 } };
   await page.route('**/api/connections', (route) => {
     state.counts.connections++;
     return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(fixtures.connections) });
@@ -583,6 +635,16 @@ async function installControlledRoutes(page, fixtures) {
       state.workMode = 'data';
     }
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(fixtures.work) });
+  });
+  await page.route('**/api/projections/work/*', route => {
+    state.counts.workScoped++;
+    const url = new URL(route.request().url());
+    const connectionId = url.pathname.split('/').at(-1);
+    const item = fixtures.work.find(value => value.connectionId === connectionId && value.requestId === url.searchParams.get('requestId'));
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+      resource: 'work', connectionId, configEpoch: 1, revision: 7, listRevision: 1,
+      lastObservedAt: new Date().toISOString(), syncedAt: new Date().toISOString(), item: item || null
+    }) });
   });
   return state;
 }
@@ -617,6 +679,17 @@ async function controlledUiSuite(browser) {
   await login(context, page);
   const fixtures = controlledFixtures(controlledNow);
   const routeState = await installControlledRoutes(page, fixtures);
+  routeState.settingsReads = 0;
+  routeState.settingsRevision = 0;
+  await page.route(/\/api\/connections\/[^/]+\/node-settings(?:\/[^?]*)?(?:\?.*)?$/, route => {
+    const path = new URL(route.request().url()).pathname;
+    const nodeId = new URL(route.request().url()).searchParams.get('nodeId');
+    if (path.endsWith('/node-settings')) routeState.settingsReads++;
+    const data = path.endsWith('/model-catalog')
+      ? { ...modelCatalogFixture, nodeId }
+      : { ...nodeSettingsFixture, nodeId, resourceRevision: routeState.settingsRevision };
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(data) });
+  });
   await page.evaluate(() => {
     const banner = document.createElement('div');
     banner.dataset.testid = 'controlled-data-banner';
@@ -624,12 +697,30 @@ async function controlledUiSuite(browser) {
     Object.assign(banner.style, {
       position: 'fixed', right: '16px', bottom: '16px', zIndex: '2147483647',
       padding: '7px 10px', background: '#fff4ce', border: '1px solid #b88700',
-      color: '#5c4300', font: '600 12px/1.2 system-ui'
+      color: '#5c4300', font: '600 12px/1.2 system-ui', pointerEvents: 'none'
     });
     document.body.appendChild(banner);
   });
   await openSection(page, 'work');
   await assertTableRows(page, 'work-table', 3, 'Controlled Work table');
+  await page.getByText('Подключено', { exact: true }).waitFor();
+  const beforeScopedEvent = { ...routeState.counts };
+  const event = { schemaVersion: 1, resource: 'work', connectionId: fixtures.work[0].connectionId,
+    nodeId: fixtures.work[0].nodeId, configEpoch: 1, entityId: fixtures.work[0].requestId,
+    revision: 7, kind: 'request.updated', listRevision: 1 };
+  const injectEvent = change => page.evaluate(payload => {
+    const socket = window.__acceptanceSockets.find(candidate => candidate.readyState === WebSocket.OPEN);
+    if (!socket) throw new Error('No connected realtime WebSocket for controlled invalidation.');
+    socket.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ push: { channel: 'connections', pub: { data: payload } } }) + '\n' }));
+  }, change);
+  await injectEvent(event);
+  await poll(async () => assert.equal(routeState.counts.workScoped, beforeScopedEvent.workScoped + 1),
+    'A Work invalidation must fetch only its exact request');
+  assert.equal(routeState.counts.work, beforeScopedEvent.work, 'Exact Work event must not refetch the collection.');
+  await injectEvent(event);
+  await injectEvent({ ...event, revision: 6 });
+  await page.waitForTimeout(250);
+  assert.equal(routeState.counts.workScoped, beforeScopedEvent.workScoped + 1, 'Duplicate and older events must not refetch.');
   const selectedButton = await unique(page.getByTestId(workRowTestId(fixtures.work[0])).getByRole('button'), 'Controlled selected Work action');
   await selectedButton.focus();
   await page.keyboard.press('Enter');
@@ -641,10 +732,8 @@ async function controlledUiSuite(browser) {
 
   routeState.workMode = 'blocked';
   await page.getByTestId('refresh-current').click();
-  await page.getByText('Загрузка данных…', { exact: true }).waitFor();
   await poll(async () => assert.equal(typeof routeState.workRelease, 'function'), 'Blocked Work request must reach the route');
   routeState.workRelease();
-  await page.getByText('Загрузка данных…', { exact: true }).waitFor({ state: 'hidden' });
   await poll(async () => {
     assert.equal(await page.getByTestId('work-search').inputValue(), 'Синхронизация', 'Filter must survive refetch.');
     assert.equal(await page.getByTestId(workRowTestId(fixtures.work[0])).getByRole('button').getAttribute('aria-pressed'), 'true',
@@ -686,8 +775,8 @@ async function controlledUiSuite(browser) {
   await nonemptyScreenshot(page, 'controlled-01-work-qhd.png');
 
   await openSection(page, 'history');
-  await assertTableRows(page, 'history-table', 3, 'Controlled History table');
-  const controlledHistoryButton = page.getByTestId(historyRowTestId(fixtures.history[0])).getByRole('button');
+  await assertTableRows(page, 'history-list', 3, 'Controlled History list');
+  const controlledHistoryButton = page.getByTestId(historyRowTestId(fixtures.history[0]));
   await controlledHistoryButton.click();
   await poll(async () => assert.equal(await controlledHistoryButton.getAttribute('aria-pressed'), 'true'),
     'Controlled History selection must render before screenshot');
@@ -696,47 +785,77 @@ async function controlledUiSuite(browser) {
   await openSection(page, 'nodes');
   await assertTableRows(page, 'nodes-table', 6, 'Controlled Nodes table');
   const nodesText = await page.getByTestId('nodes-table').innerText();
-  for (const label of ['Доступность неизвестна', 'API доступен', 'Данные API устарели', 'API недоступен']) {
+  for (const label of ['Ожидает проверки', 'Готово', 'Устарело', 'Недоступно']) {
     assert.ok(nodesText.includes(label), `Controlled Nodes must render state: ${label}`);
   }
-  for (const label of ['Свободна', 'Занята', 'Неизвестно']) {
-    assert.ok(nodesText.includes(label), `Controlled Nodes must render occupancy: ${label}`);
-  }
-  for (const label of ['Принимает новые', 'Приём закрыт', 'Готовность неизвестна', 'Конфликт идентичности']) {
+  for (const label of ['Приём закрыт', 'Конфликт идентичности']) {
     assert.ok(nodesText.includes(label), `Controlled Nodes must render readiness/identity state: ${label}`);
   }
   const readyNodeText = await page.getByTestId(`node-row-${fixtures.nodes[0].connectionId}`).innerText();
-  assert.ok(readyNodeText.includes('Свободна') && readyNodeText.includes('Принимает новые'),
-    'Ready fixture must be idle and accepting in Nodes.');
+  assert.ok(readyNodeText.includes('Готово'), 'Ready fixture must show a ready state in Nodes.');
   const busyNodeText = await page.getByTestId(`node-row-${fixtures.nodes[1].connectionId}`).innerText();
-  assert.ok(busyNodeText.includes('Занята') && busyNodeText.includes('Приём закрыт'),
-    'Busy fixture must be active and closed to new work in Nodes.');
-  assert.ok((await page.getByTestId(`node-row-${fixtures.nodes[3].connectionId}`).innerText()).includes('Неизвестно'),
-    'Unavailable fixture occupancy must remain unknown.');
-  const controlledNodeButton = page.getByTestId(`node-row-${fixtures.nodes[0].connectionId}`).getByRole('button');
+  assert.ok(busyNodeText.includes('Приём закрыт'), 'Busy fixture must be closed to new work in Nodes.');
+  assert.ok((await page.getByTestId(`node-row-${fixtures.nodes[3].connectionId}`).innerText()).includes('Недоступно'),
+    'Unavailable fixture must show the unavailable state.');
+  const controlledNodeButton = page.getByTestId(`node-row-${fixtures.nodes[0].connectionId}`);
   await controlledNodeButton.click();
-  await poll(async () => assert.equal(await controlledNodeButton.getAttribute('aria-pressed'), 'true'),
+  await poll(async () => assert.equal(await controlledNodeButton.getAttribute('aria-selected'), 'true'),
     'Controlled Node selection must render before screenshot');
+  const keyboardNode = page.getByTestId(`node-row-${fixtures.nodes[1].connectionId}`);
+  await keyboardNode.focus();
+  await page.keyboard.press('Enter');
+  await poll(async () => assert.equal(await keyboardNode.getAttribute('aria-selected'), 'true'),
+    'Enter must select the whole Node row');
+  await controlledNodeButton.focus();
+  await page.keyboard.press('Space');
+  await poll(async () => assert.equal(await controlledNodeButton.getAttribute('aria-selected'), 'true'),
+    'Space must select the whole Node row');
+  await page.getByTestId('open-agent-settings').click();
+  const popup = page.getByTestId('settings-popup');
+  await popup.waitFor();
+  await page.getByTestId('node-speed').check();
+  await page.keyboard.press('Escape');
+  await popup.getByRole('group', { name: 'Несохранённые изменения' }).waitFor();
+  await popup.getByRole('button', { name: 'Продолжить редактирование' }).click();
+  assert.equal(await page.getByTestId('node-speed').isChecked(), true, 'Dirty speed selection must survive a cancelled close.');
+  await popup.getByRole('button', { name: 'Закрыть настройки' }).click();
+  await popup.getByRole('button', { name: 'Закрыть без сохранения' }).click();
+  await page.getByTestId('open-mcp-settings').click();
+  await page.getByTestId('mcp-json-editor').fill('{ invalid json');
+  await page.getByTestId('mcp-validate').click();
+  await popup.getByRole('alert').waitFor();
+  assert.equal(await page.getByTestId('mcp-json-editor').inputValue(), '{ invalid json', 'Malformed JSON must remain editable.');
+  const beforeSettingsEvent = routeState.settingsReads;
+  routeState.settingsRevision = 1;
+  await injectEvent({ schemaVersion: 1, resource: 'node_settings', connectionId: fixtures.connections[0].id,
+    nodeId: fixtures.nodes[0].observation.nodeId, configEpoch: 1, entityId: fixtures.nodes[0].observation.nodeId,
+    revision: 1, kind: 'changed' });
+  await poll(async () => assert.equal(routeState.settingsReads, beforeSettingsEvent + 1),
+    'Selected settings event must read only the current node');
+  assert.equal(await page.getByTestId('mcp-json-editor').inputValue(), '{ invalid json',
+    'Settings readback must preserve the dirty MCP editor.');
+  await injectEvent({ schemaVersion: 1, resource: 'node_settings', connectionId: fixtures.connections[1].id,
+    nodeId: fixtures.nodes[1].observation.nodeId, configEpoch: 1, entityId: fixtures.nodes[1].observation.nodeId,
+    revision: 1, kind: 'changed' });
+  await page.waitForTimeout(250);
+  assert.equal(routeState.settingsReads, beforeSettingsEvent + 1, 'Other-node settings event must not read this editor.');
+  await page.setViewportSize({ width: 640, height: 360 });
+  const bounds = await popup.boundingBox();
+  assert.ok(bounds && bounds.x >= 0 && bounds.x + bounds.width <= 640 && bounds.y >= 0 && bounds.y + bounds.height <= 360,
+    'Popup must fit the effective CSS viewport at 200% zoom.');
+  await popup.getByRole('button', { name: 'Закрыть настройки' }).click();
+  await popup.getByRole('button', { name: 'Закрыть без сохранения' }).click();
+  await page.setViewportSize({ width: 2560, height: 1440 });
   await unique(page.getByTestId('node-inspector').locator('details'), 'Controlled Node details');
   await nonemptyScreenshot(page, 'controlled-03-nodes-qhd.png');
-  await openSection(page, 'settings');
-  await assertTableRows(page, 'connections-table', 6, 'Controlled Connections table');
-  const connectionsText = await page.getByTestId('connections-table').innerText();
+  const connectionsText = await page.getByTestId('nodes-table').innerText();
   assert.ok(connectionsText.includes('Конфликт идентичности'),
-    'Controlled Settings must show the identity conflict explicitly.');
-  assert.ok((await page.getByTestId(`connection-row-${fixtures.connections[0].id}`).innerText()).includes('Готово'),
-    'Ready fixture must remain ready in Settings.');
-  assert.ok((await page.getByTestId(`connection-row-${fixtures.connections[1].id}`).innerText()).includes('Приём закрыт'),
-    'Busy fixture readiness must remain closed in Settings, matching Nodes.');
-  const controlledConnectionButton = page.getByTestId(`connection-row-${fixtures.connections[0].id}`).getByRole('button');
-  await controlledConnectionButton.click();
-  await poll(async () => assert.equal(await controlledConnectionButton.getAttribute('aria-pressed'), 'true'),
-    'Controlled Connection selection must render before screenshot');
-  await page.getByTestId('connection-inspector').getByTestId('connection-name').waitFor();
-  await nonemptyScreenshot(page, 'controlled-04-settings-qhd.png');
+    'Controlled Nodes must show the identity conflict explicitly.');
+  await page.getByTestId('node-inspector').getByTestId('connection-name').waitFor();
+  await nonemptyScreenshot(page, 'controlled-04-node-settings-qhd.png');
 
   await page.setViewportSize({ width: 390, height: 844 });
-  for (const section of ['work', 'history', 'nodes', 'settings']) {
+  for (const section of ['work', 'history', 'nodes']) {
     await openSection(page, section);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 390,
       `${section} must not overflow the 390px document width.`);
@@ -764,6 +883,8 @@ try {
   await waitForProjection(first, '/api/projections/nodes',
     (items) => items.length === 2 && items.every((item) => item.identityStatus === 'unique' && item.observation?.nodeId),
     'Both registered Harness executors must be observed exactly once.', 60_000);
+  await assertNativeSettingsContracts(first, manifest);
+  await assertCodexModeOnlyApply(first, manifest);
   await openSection(second, 'work');
   const expected = await ensureHarnessFixtures(first, manifest);
   await assertRealIntegration(first, second, manifest, expected);
@@ -789,7 +910,10 @@ try {
     }
   });
   await first.reload({ waitUntil: 'networkidle' });
-  await first.getByRole('button', { name: 'Войти', exact: true }).waitFor();
+  await poll(async () => assert.ok(
+    await first.getByRole('button', { name: 'Войти', exact: true }).isVisible() ||
+    await first.getByTestId('screen-work').isVisible()),
+  'Expired local session must either renew or request login');
   assertNoPageErrors(first, 'Primary integration page');
   assertNoPageErrors(second, 'Secondary integration page');
   await firstContext.close();

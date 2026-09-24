@@ -10,6 +10,7 @@ interface AuthOperation {
 }
 export interface ProviderAuthSnapshot {
   nodeId: string; revision: number; state: string; checkedAt: string | null; reasonCode: string | null;
+  resourceRevision?: number;
   capabilities: { methods: string[]; canCheck: boolean; canLogout: boolean };
   operation: AuthOperation | null;
 }
@@ -89,6 +90,8 @@ export class ProviderAuthComponent implements OnChanges, OnDestroy {
   @Input() connectionId = '';
   @Input() nodeId: string | null = null;
   @Input() configEpoch = 0;
+  @Input() refreshVersion = 0;
+  @Input() refreshEvent: { connectionId: string; nodeId?: string | null; configEpoch: number; revision: number } | null = null;
   @Input() accessToken = '';
   @Input() canManage = false;
   @Input() conflict = false;
@@ -98,8 +101,8 @@ export class ProviderAuthComponent implements OnChanges, OnDestroy {
   readonly uncertain = signal(false); readonly confirmLogout = signal(false);
   secret = '';
   private generation = 0;
-  private poll?: number;
   private reading = false;
+  private readAgain = false;
   pendingCommand?: string;
   pendingAction?: string;
   pendingMethod?: string;
@@ -107,38 +110,50 @@ export class ProviderAuthComponent implements OnChanges, OnDestroy {
 
   @Input() sessionKey = '';
   ngOnChanges(changes: SimpleChanges): void {
-    if (this.sessionKey && Object.keys(changes).every(key => key === 'accessToken') && !changes['accessToken']?.firstChange) return;
+    const keys = Object.keys(changes);
+    if (this.sessionKey && keys.every(key => ['accessToken', 'refreshVersion', 'refreshEvent'].includes(key)) &&
+      !keys.some(key => changes[key].firstChange)) {
+      if (changes['refreshVersion'] || changes['refreshEvent']) this.read(false);
+      return;
+    }
     this.generation++; this.secret = ''; this.snapshot.set(null); this.error.set('');
     this.busy.set(false); this.loading.set(false); this.uncertain.set(false); this.confirmLogout.set(false);
-    this.pendingCommand = undefined; this.pendingAction = undefined; this.pendingMethod = undefined; this.reading = false;
-    if (this.poll) window.clearInterval(this.poll);
+    this.pendingCommand = undefined; this.pendingAction = undefined; this.pendingMethod = undefined; this.reading = false; this.readAgain = false;
     if (this.canManage && this.nodeId && !this.conflict) {
       this.read();
-      this.poll = window.setInterval(() => { if (!document.hidden && !this.loading() && !this.busy()) this.read(false); }, 4000);
     }
   }
-  ngOnDestroy(): void { this.generation++; this.secret = ''; if (this.poll) window.clearInterval(this.poll); }
+  ngOnDestroy(): void { this.generation++; this.secret = ''; }
   private base(): string { return '/api/connections/' + encodeURIComponent(this.connectionId) + '/provider-auth'; }
   private headers(): HttpHeaders { return new HttpHeaders({ Authorization: 'Bearer ' + this.accessToken }); }
   read(showLoading = true): void {
-    if (!this.nodeId || !this.canManage || this.conflict || this.reading) return;
+    if (!this.nodeId || !this.canManage || this.conflict) return;
+    if (this.reading) { this.readAgain = true; return; }
     this.reading = true;
     const generation = this.generation;
     if (showLoading) this.loading.set(true);
     this.http.get<ProviderAuthSnapshot>(this.base(), { headers: this.headers(), params: { nodeId: this.nodeId, configEpoch: this.configEpoch } }).subscribe({
       next: value => {
         if (generation !== this.generation) return;
-        this.accept(value); this.loading.set(false); this.reading = false; this.error.set('');
+        this.accept(value); this.loading.set(false); this.finishRead(); this.error.set('');
         // Lost ACK is reconciled by command identity, never by automatic resubmission.
         if (value.operation?.commandId === this.pendingCommand ||
             (this.pendingAction === 'logout' && value.state === 'unauthenticated') ||
             (this.pendingAction?.endsWith('/cancel') && value.operation?.operationId === this.pendingAction.split('/')[1] && value.operation?.status !== 'pending')) this.uncertain.set(false);
       },
-      error: failure => { if (generation === this.generation) { this.loading.set(false); this.reading = false; this.error.set(this.failureLabel(failure)); } }
+      error: failure => { if (generation === this.generation) { this.loading.set(false); this.finishRead(); this.error.set(this.failureLabel(failure)); } }
     });
   }
+  private finishRead(): void {
+    this.reading = false;
+    if (this.readAgain) { this.readAgain = false; queueMicrotask(() => this.read(false)); }
+  }
   private accept(value: ProviderAuthSnapshot): void {
-    if (value.nodeId !== this.nodeId || (this.snapshot()?.revision ?? -1) > value.revision) return;
+    const event = this.refreshEvent;
+    const minimum = event?.connectionId === this.connectionId && event.configEpoch === this.configEpoch &&
+      (!event.nodeId || event.nodeId === this.nodeId) ? event.revision : -1;
+    if (value.nodeId !== this.nodeId || (this.snapshot()?.revision ?? -1) > value.revision ||
+      (value.resourceRevision ?? -1) < Math.max(minimum, this.snapshot()?.resourceRevision ?? -1)) return;
     this.snapshot.set(value);
     this.snapshotChange.emit(value);
   }

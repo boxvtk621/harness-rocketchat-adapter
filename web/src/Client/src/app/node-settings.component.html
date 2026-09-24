@@ -1,0 +1,118 @@
+<section class="node-settings inspector-card" data-testid="node-settings" aria-labelledby="node-settings-title">
+  <div class="inspector-section-head">
+    <div><h3 id="node-settings-title">Исполнение</h3><p>Модель и MCP для диалогов ноды.</p></div>
+    <span *ngIf="envelope()" [class]="'status ' + (settingsApplied() ? 'ready' : 'unknown')">{{ settingsStatus() }}</span>
+  </div>
+  <p *ngIf="!canManage" class="muted">Доступно пользователям с правом управления подключениями.</p>
+  <p *ngIf="canManage && (!nodeId || conflict)" class="muted">Сначала требуется подтверждённая уникальная нода.</p>
+  <p *ngIf="loading() && !envelope()" role="status">Загрузка настроек…</p>
+  <p *ngIf="error() && !popup()" class="settings-error" role="alert">{{ error() }} <button type="button" (click)="read()">Повторить</button></p>
+  <ng-container *ngIf="canManage && envelope() as value">
+    <div class="settings-effective" data-testid="settings-effective">
+      <strong>Применённый снимок</strong>
+      <span *ngIf="value.applied; else unverifiedSettings">Модель: {{ value.applied.inference.modelId || 'по умолчанию' }} · Скорость: {{ value.applied.inference.speedMode || 'настройка модели' }} · Рассуждения: {{ value.applied.inference.reasoningEffort || 'настройка модели' }}</span>
+      <span *ngIf="value.applied">MCP: {{ appliedMcpNames(value.applied) }}</span>
+      <ng-template #unverifiedSettings><span>Применённые значения пока не подтверждены нодой.</span></ng-template>
+    </div>
+    <p class="hint">Сохранённый черновик: модель {{ value.draft.inference.modelId || 'по умолчанию' }}, MCP {{ currentMcpNames() }}. Подтверждение фактического режима зависит от runtime.</p>
+    <div class="actions settings-actions">
+      <button type="button" data-testid="open-agent-settings" (click)="openPopup('agent', $event)">Параметры агента</button>
+      <button type="button" data-testid="open-mcp-settings" (click)="openPopup('mcp', $event)">MCP JSON</button>
+    </div>
+    <div *ngIf="value.operation as operation" class="settings-operation" role="status">
+      <span>{{ operationPhaseLabel(operation) }}</span><strong>{{ operationLabel(operation) }}</strong>
+      <span *ngIf="operation.reasonCode">{{ operation.reasonCode }}</span>
+    </div>
+  </ng-container>
+</section>
+
+<div *ngIf="popup() as kind" class="settings-modal-backdrop" (click)="closePopup()">
+  <section class="settings-modal" role="dialog" aria-modal="true" [attr.aria-labelledby]="kind === 'agent' ? 'agent-popup-title' : 'mcp-popup-title'"
+    data-testid="settings-popup" tabindex="-1" (click)="$event.stopPropagation()" (keydown)="onPopupKeydown($event)">
+    <div class="settings-modal-head">
+      <div>
+        <p class="inspector-kicker">{{ displayName || connectionId }}</p>
+        <h2 *ngIf="kind==='agent'" id="agent-popup-title">Параметры агента</h2>
+        <h2 *ngIf="kind==='mcp'" id="mcp-popup-title">MCP JSON</h2>
+      </div>
+      <button type="button" data-popup-first data-testid="close-settings-popup" aria-label="Закрыть настройки" (click)="closePopup()">×</button>
+    </div>
+    <p *ngIf="error()" class="settings-error" role="alert">{{ error() }}</p>
+    <ng-container *ngIf="draft() as settings">
+      <div *ngIf="kind==='agent'" class="settings-modal-body">
+        <label>Модель
+          <select data-testid="node-model" [(ngModel)]="settings.inference.modelId" [disabled]="!catalogFresh() || busy()">
+            <option *ngIf="modelDefaultSupported()" [ngValue]="null">Модель ноды по умолчанию</option>
+            <option *ngIf="settings.inference.modelId && !selectedModel()" [value]="settings.inference.modelId">{{ settings.inference.modelId }} (сохранено)</option>
+            <option *ngFor="let model of catalog()?.models || []; trackBy: trackModel" [value]="model.id">{{ model.displayName || model.id }}</option>
+          </select>
+        </label>
+        <div class="catalog-line">
+          <span [class]="'status ' + (catalogFresh() ? 'ready' : 'attention')">{{ catalogLabel() }}</span>
+          <button type="button" (click)="loadCatalog(true)" [disabled]="catalogLoading()">Обновить каталог</button>
+          <button *ngIf="catalog()?.nextCursor" type="button" (click)="loadCatalog(false)" [disabled]="catalogLoading()">Ещё модели</button>
+        </div>
+        <p *ngIf="modelRequired()" class="hint" role="alert">Для этой ноды необходимо выбрать модель.</p>
+        <div class="settings-mode">
+          <strong>Ускорение</strong>
+          <ng-container *ngIf="settings.inference.speedMode !== null; else inheritedSpeed">
+            <label class="toggle"><input data-testid="node-speed" type="checkbox" role="switch" [checked]="settings.inference.speedMode==='on'" (change)="setSpeed($any($event.target).checked)" [disabled]="!speedSupported() || busy()"> {{ settings.inference.speedMode==='on' ? 'Включено' : 'Выключено' }}</label>
+            <button *ngIf="speedDefaultSupported()" type="button" (click)="resetSpeed()" [disabled]="busy()">Использовать настройку модели</button>
+          </ng-container>
+          <ng-template #inheritedSpeed>
+            <span class="hint">Используется настройка модели; фактическое значение не подтверждено.</span>
+            <button type="button" (click)="startSpeed()" [disabled]="!speedSupported() || busy()">Задать вручную</button>
+          </ng-template>
+        </div>
+        <div class="settings-mode">
+          <strong>Глубина рассуждений</strong>
+          <ng-container *ngIf="settings.inference.reasoningEffort !== null; else inheritedReasoning">
+            <label>{{ settings.inference.reasoningEffort }}
+              <input data-testid="node-reasoning" type="range" min="0" step="1" [max]="(selectedModel()?.reasoningEfforts?.length || 1)-1"
+                [value]="reasoningIndex()" [attr.aria-valuetext]="settings.inference.reasoningEffort"
+                (input)="setReasoningIndex($any($event.target).value)" [disabled]="!reasoningSupported() || busy()">
+            </label>
+            <button *ngIf="reasoningDefaultSupported()" type="button" (click)="resetReasoning()" [disabled]="busy()">Использовать настройку модели</button>
+          </ng-container>
+          <ng-template #inheritedReasoning>
+            <span class="hint">Используется настройка модели; фактический уровень не подтверждён.</span>
+            <button type="button" (click)="startReasoning()" [disabled]="!reasoningSupported() || busy()">Выбрать уровень</button>
+          </ng-template>
+        </div>
+        <p *ngIf="incompatibleChoice('speed') || incompatibleChoice('reasoning') || incompatibleTuple()" class="hint" role="alert">Выбранное сочетание не подтверждено каталогом этой модели.</p>
+      </div>
+      <div *ngIf="kind==='mcp'" class="settings-modal-body">
+        <p class="hint">Редактируйте документ, который поддерживает эта Harness. Секреты на чтении скрыты: keep сохраняет прежний слот, replace требует secret, remove удаляет его.</p>
+        <label for="mcp-json-editor">Конфигурация MCP</label>
+        <textarea id="mcp-json-editor" data-testid="mcp-json-editor" class="mcp-json-editor" [(ngModel)]="mcpText"
+          (ngModelChange)="jsonValidated.set(false)" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
+        <div class="actions"><button type="button" data-testid="mcp-validate" (click)="checkJson()" [disabled]="jsonValidating()">{{ jsonValidating() ? 'Проверяем…' : 'Проверить JSON' }}</button>
+          <span *ngIf="jsonValidated()" role="status">Текущий текст принят схемой. Доступность MCP не проверялась.</span></div>
+        <ul *ngIf="jsonErrors().length" class="settings-error" role="alert"><li *ngFor="let issue of jsonErrors()">{{ issue }}</li></ul>
+        <div class="mcp-saved-checks" *ngIf="envelope() as value">
+          <strong>Проверка сохранённой ревизии {{ value.draftRevision }}</strong>
+          <p class="hint">Проверка подключения доступна только когда текст совпадает с сохранённым документом.</p>
+          <div *ngFor="let server of value.draft.mcpDocument.servers; trackBy: trackMcp" class="mcp-saved-row">
+            <span>{{ server.name }} · {{ server.transport }}</span>
+            <button type="button" (click)="checkMcp(server)" [disabled]="hasUnsavedChanges() || !!checkingId()">Проверить подключение</button>
+            <span *ngIf="checkResults()[server.id]" role="status">{{ checkResults()[server.id] }}</span>
+          </div>
+        </div>
+      </div>
+      <div class="settings-modal-foot">
+        <span class="hint">{{ hasUnsavedChanges() ? 'Есть несохранённые правки' : 'Снимок синхронизирован' }}</span>
+        <button type="button" class="primary" data-testid="settings-apply" (click)="confirmApply.set(true)"
+          [disabled]="busy() || operationInFlight() || applyUnsupported() || modelRequired() || incompatibleChoice('speed') || incompatibleChoice('reasoning') || incompatibleTuple() || (inferenceChanged() && !catalogFresh()) || (!hasUnsavedChanges() && envelope()?.draftRevision===envelope()?.appliedRevision)">Применить изменения</button>
+      </div>
+      <div *ngIf="confirmApply()" class="apply-confirm" role="group" aria-label="Подтверждение применения настроек">
+        <strong>Применить изменения ко всем диалогам ноды?</strong>
+        <p>Текущая работа сначала завершится. При изменении MCP процесс агента перезапустится внутри контейнера; история и авторизация сохранятся.</p>
+        <div class="actions"><button type="button" class="primary" data-testid="settings-confirm-apply" (click)="apply()" [disabled]="busy()">Подтвердить</button><button type="button" (click)="confirmApply.set(false)">Отмена</button></div>
+      </div>
+      <div *ngIf="confirmClose()" class="apply-confirm" role="group" aria-label="Несохранённые изменения">
+        <strong>Закрыть и потерять правки?</strong>
+        <div class="actions"><button type="button" (click)="confirmClose.set(false)">Продолжить редактирование</button><button type="button" (click)="closePopup(true)">Закрыть без сохранения</button></div>
+      </div>
+    </ng-container>
+  </section>
+</div>

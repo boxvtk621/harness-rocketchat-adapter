@@ -82,7 +82,16 @@ public interface IHarnessClient
         new(200, await GetAsync(connection, path, query, cancellationToken));
     IAsyncEnumerable<long> WatchEventsAsync(Connection connection, long after,
         CancellationToken cancellationToken);
+    async IAsyncEnumerable<HarnessEvent> WatchDetailedEventsAsync(Connection connection, long after,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        await foreach (var sequence in WatchEventsAsync(connection, after, cancellationToken))
+            yield return new HarnessEvent(sequence, null, null, null, null, null);
+    }
 }
+
+public sealed record HarnessEvent(long Seq, string? Type, string? NodeId, string? EntityId,
+    string? DialogId, string? RequestId, string? AttemptId = null);
 
 public sealed class HarnessClient(HttpClient http, IOptions<HarnessOptions> options, HarnessAddressPolicy addresses) : IHarnessClient
 {
@@ -196,6 +205,12 @@ public sealed class HarnessClient(HttpClient http, IOptions<HarnessOptions> opti
     public async IAsyncEnumerable<long> WatchEventsAsync(Connection connection, long after,
         [EnumeratorCancellation] CancellationToken ct)
     {
+        await foreach (var item in WatchDetailedEventsAsync(connection, after, ct)) yield return item.Seq;
+    }
+
+    public async IAsyncEnumerable<HarnessEvent> WatchDetailedEventsAsync(Connection connection, long after,
+        [EnumeratorCancellation] CancellationToken ct)
+    {
         var uri = HarnessUri.Build(connection.BaseUri,
             ["v1", "nodes", connection.Observation.NodeId!, "events"],
             new Dictionary<string, string?> { ["after"] = after.ToString(System.Globalization.CultureInfo.InvariantCulture) });
@@ -211,19 +226,29 @@ public sealed class HarnessClient(HttpClient http, IOptions<HarnessOptions> opti
             var line = await reader.ReadLineAsync(ct);
             if (line is null) yield break;
             if (!line.StartsWith("data:", StringComparison.Ordinal)) continue;
-            var value = ParseEventSequence(line[5..].TrimStart());
-            if (value <= after) continue;
-            after = value;
+            var value = ParseEvent(line[5..].TrimStart());
+            if (value.Seq <= after) continue;
+            after = value.Seq;
             yield return value;
         }
     }
 
-    private static long ParseEventSequence(string data)
+    private static HarnessEvent ParseEvent(string data)
     {
         try
         {
             using var envelope = JsonDocument.Parse(data);
-            if (envelope.RootElement.TryGetProperty("seq", out var seq) && seq.TryGetInt64(out var value)) return value;
+            var root = envelope.RootElement;
+            if (root.TryGetProperty("seq", out var seq) && seq.TryGetInt64(out var value))
+            {
+                static string? Str(JsonElement item, string key) =>
+                    item.TryGetProperty(key, out var property) && property.ValueKind == JsonValueKind.String ? property.GetString() : null;
+                var payload = root.TryGetProperty("payload", out var p) && p.ValueKind == JsonValueKind.Object ? p : default;
+                var requestId = Str(root, "requestId") ?? (payload.ValueKind == JsonValueKind.Object ? Str(payload, "requestId") : null);
+                return new(value, Str(root, "type"), Str(root, "nodeId"), Str(root, "entityId"),
+                    Str(root, "dialogId") ?? (payload.ValueKind == JsonValueKind.Object ? Str(payload, "dialogId") : null),
+                    requestId, Str(root, "attemptId"));
+            }
         }
         catch (JsonException) { }
         throw new HarnessPayloadException();

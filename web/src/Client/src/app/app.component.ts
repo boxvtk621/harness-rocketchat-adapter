@@ -39,6 +39,7 @@ interface Observation {
 
 interface Connection {
   id: string;
+  revision?: number;
   name: string;
   baseUri: string;
   configEpoch: number;
@@ -186,6 +187,30 @@ interface DialogNavigationTarget {
 type Section = 'work' | 'history' | 'nodes' | 'dialogs';
 type Resource = 'connections' | 'nodes' | 'work' | 'history';
 type RefreshTarget = Resource | 'dialogs';
+type InvalidationResource = Resource | 'dialogs' | 'node_settings' | 'provider_auth';
+interface Invalidation {
+  schemaVersion: 1;
+  resource: InvalidationResource;
+  connectionId: string;
+  nodeId?: string | null;
+  configEpoch: number;
+  entityId?: string | null;
+  operationId?: string | null;
+  revision: number;
+  listRevision?: number | null;
+  kind: string;
+}
+interface ScopedRead<T> {
+  resource: string;
+  connectionId: string;
+  configEpoch: number;
+  revision: number;
+  listRevision?: number | null;
+  lastObservedAt?: string | null;
+  syncedAt?: string | null;
+  item?: T | null;
+  items?: T[] | null;
+}
 
 @Component({
   selector: 'app-root',
@@ -212,8 +237,13 @@ export class AppComponent implements OnInit, OnDestroy {
   readonly saveBusy = signal(false);
   readonly authError = signal('');
   readonly sessionNotice = signal('');
-  readonly clock = signal(Date.now());
   readonly dialogsRefreshVersion = signal(0);
+  readonly dialogInvalidation = signal<Invalidation | null>(null);
+  readonly providerAuthRefreshVersion = signal(0);
+  readonly nodeSettingsRefreshVersion = signal(0);
+  readonly providerAuthInvalidation = signal<Invalidation | null>(null);
+  readonly nodeSettingsInvalidation = signal<Invalidation | null>(null);
+  readonly lastSyncAt = signal<Record<RefreshTarget, string | null>>({ connections: null, nodes: null, work: null, history: null, dialogs: null });
   readonly dialogsOpened = signal(false);
   readonly dialogsSession = signal(sessionStorage.getItem('hl307.web-session') || crypto.randomUUID());
   readonly dialogNavigationTarget = signal<DialogNavigationTarget | null>(null);
@@ -243,8 +273,6 @@ export class AppComponent implements OnInit, OnDestroy {
   private originalBaseUri = '';
   private centrifuge?: Centrifuge;
   private subscription?: Subscription;
-  private refreshTimer?: number;
-  private clockTimer?: number;
   private hadRealtimeDisconnect = false;
   private renewal?: Promise<User | null>;
   private renewalRetryTimer?: number;
@@ -252,7 +280,8 @@ export class AppComponent implements OnInit, OnDestroy {
   private loggingOut = false;
   private readonly inFlight = new Set<Resource>();
   private readonly pending = new Set<Resource>();
-  private readonly queuedResources = new Set<RefreshTarget>();
+  private readonly seenInvalidations = new Map<string, number>();
+  private readonly resourceGeneration: Record<Resource, number> = { connections: 0, nodes: 0, work: 0, history: 0 };
   private historyToolsLoadRevision = 0;
   private historyToolDetailRevision = 0;
   private providerAuthLoadRevision = 0;
@@ -292,7 +321,6 @@ export class AppComponent implements OnInit, OnDestroy {
 
   async ngOnInit(): Promise<void> {
     this.registerAuthEvents();
-    this.clockTimer = window.setInterval(() => this.clock.set(Date.now()), 1000);
     try {
       if (location.pathname === '/auth/callback') {
         await this.users.signinRedirectCallback();
@@ -313,8 +341,6 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   ngOnDestroy(): void {
-    if (this.refreshTimer) window.clearTimeout(this.refreshTimer);
-    if (this.clockTimer) window.clearInterval(this.clockTimer);
     if (this.renewalRetryTimer) window.clearTimeout(this.renewalRetryTimer);
     if (this.providerAuthLoadTimer) window.clearTimeout(this.providerAuthLoadTimer);
     this.unregisterAuthEvents();
@@ -373,6 +399,8 @@ export class AppComponent implements OnInit, OnDestroy {
     return this.section();
   }
 
+  markDialogSynced(value: string): void { this.markSynced('dialogs', value); }
+
   selectWork(item: WorkProjection): void { this.selectedWorkId.set(this.workKey(item)); }
   selectHistory(item: HistoryRow): void {
     this.selectedHistoryId.set(item.key);
@@ -383,6 +411,23 @@ export class AppComponent implements OnInit, OnDestroy {
   selectManagedNode(item: ManagedNodeRow): void {
     this.selectConnection(item.connection);
     this.selectedNodeId.set(item.connection.id);
+  }
+
+  selectManagedNodeFromRow(event: MouseEvent, item: ManagedNodeRow): void {
+    const target = event.target;
+    if (target instanceof Element && target.closest('button, a, input, select, textarea, label, summary')) return;
+    const selection = window.getSelection();
+    const row = event.currentTarget;
+    if (selection && !selection.isCollapsed && row instanceof HTMLElement &&
+      ((selection.anchorNode && row.contains(selection.anchorNode)) ||
+       (selection.focusNode && row.contains(selection.focusNode)))) return;
+    this.selectManagedNode(item);
+  }
+
+  selectManagedNodeFromKeyboard(event: Event, item: ManagedNodeRow): void {
+    if (event.target !== event.currentTarget) return;
+    event.preventDefault();
+    this.selectManagedNode(item);
   }
 
   openHistoryDialog(item: HistoryRow): void {
@@ -464,9 +509,12 @@ export class AppComponent implements OnInit, OnDestroy {
   loadConnections(showLoading = true): void {
     const headers = this.headers();
     if (!headers || !this.beginLoad('connections', showLoading)) return;
+    const generation = this.resourceGeneration.connections;
     this.http.get<Connection[]>('/api/connections', { headers }).subscribe({
       next: value => {
+        if (generation !== this.resourceGeneration.connections) { this.finishLoad('connections'); return; }
         this.connections.set(value);
+        this.markSynced('connections');
         this.finishLoad('connections');
         this.scheduleProviderAuthLoad();
       },
@@ -964,14 +1012,17 @@ export class AppComponent implements OnInit, OnDestroy {
   private loadProjection(kind: 'nodes' | 'work' | 'history', showLoading = true): void {
     const headers = this.headers();
     if (!headers || !this.beginLoad(kind, showLoading)) return;
+    const generation = this.resourceGeneration[kind];
     this.http.get<NodeProjection[] | WorkProjection[] | HistoryProjection[]>(`/api/projections/${kind}`, { headers }).subscribe({
       next: value => {
+        if (generation !== this.resourceGeneration[kind]) { this.finishLoad(kind); return; }
         if (kind === 'nodes') {
           this.nodes.set(value as NodeProjection[]);
           this.scheduleProviderAuthLoad();
         }
         else if (kind === 'work') this.work.set(value as WorkProjection[]);
         else this.history.set(value as HistoryProjection[]);
+        this.markSynced(kind);
         this.finishLoad(kind);
       },
       error: error => {
@@ -1219,7 +1270,7 @@ export class AppComponent implements OnInit, OnDestroy {
       });
       this.centrifuge.on('connected', () => {
         this.realtimeState.set('Подключено');
-        if (this.hadRealtimeDisconnect) this.queueRefresh(this.currentResource());
+        if (this.hadRealtimeDisconnect) this.refreshCurrent();
         this.hadRealtimeDisconnect = false;
       });
       this.centrifuge.on('connecting', () => {
@@ -1232,22 +1283,10 @@ export class AppComponent implements OnInit, OnDestroy {
       });
       this.subscription = this.centrifuge.newSubscription('connections');
       this.subscription.on('subscribed', () => {
-        this.queueRefresh('connections');
-        this.queueRefresh('nodes');
-        this.queueRefresh(this.currentResource());
+        this.refreshCurrent();
       });
       this.subscription.on('publication', event => {
-        const resource = this.invalidationResource(event.data);
-        const visible = this.currentResource();
-        if (visible === 'dialogs') {
-          this.queueRefresh('dialogs');
-          if (resource === 'nodes' || resource === 'connections') this.queueRefresh('nodes');
-          return;
-        }
-        if (resource === 'nodes' && visible === 'connections')
-          this.queueRefresh('connections');
-        else if (resource === null || resource === visible || resource === 'connections')
-          this.queueRefresh(resource ?? visible);
+        this.handleInvalidation(event.data);
       });
       this.subscription.subscribe();
       this.centrifuge.connect();
@@ -1256,25 +1295,190 @@ export class AppComponent implements OnInit, OnDestroy {
     }
   }
 
-  private queueRefresh(resource: RefreshTarget): void {
-    this.queuedResources.add(resource);
-    if (this.refreshTimer) return;
-    this.refreshTimer = window.setTimeout(() => {
-      this.refreshTimer = undefined;
-      const resources = [...this.queuedResources];
-      this.queuedResources.clear();
-      for (const queued of resources) {
-        if (queued === 'dialogs') this.dialogsRefreshVersion.update(value => value + 1);
-        else if (queued === 'connections') this.loadConnections(false);
-        else this.loadProjection(queued, false);
-      }
-    }, 180);
+  private parseInvalidation(data: unknown): Invalidation | null {
+    if (!data || typeof data !== 'object') return null;
+    const item = data as Partial<Invalidation>;
+    if (item.schemaVersion !== 1 || !['connections', 'nodes', 'work', 'history', 'dialogs', 'node_settings', 'provider_auth'].includes(item.resource || '') ||
+      typeof item.connectionId !== 'string' || !item.connectionId ||
+      !Number.isSafeInteger(item.configEpoch) || (item.configEpoch ?? -1) < 0 ||
+      !Number.isSafeInteger(item.revision) || (item.revision ?? -1) < 0 || typeof item.kind !== 'string') return null;
+    return item as Invalidation;
   }
 
-  private invalidationResource(data: unknown): Resource | null {
-    if (!data || typeof data !== 'object' || !('resource' in data)) return null;
-    const resource = (data as { resource?: unknown }).resource;
-    return resource === 'connections' || resource === 'nodes' || resource === 'work' || resource === 'history' ? resource : null;
+  private invalidationKey(item: Invalidation): string {
+    return [item.resource, item.connectionId, item.nodeId || '', item.entityId || '', item.configEpoch].join('|');
+  }
+
+  private handleInvalidation(data: unknown): void {
+    const item = this.parseInvalidation(data);
+    if (!item) { this.realtimeState.set('Несовместимое уведомление; обновите вручную'); return; }
+    const known = this.connectionFor(item.connectionId);
+    if (known && item.configEpoch < known.configEpoch) return;
+    const key = this.invalidationKey(item);
+    if (item.revision <= (this.seenInvalidations.get(key) ?? -1)) return;
+    this.seenInvalidations.set(key, item.revision);
+    const visible = this.section();
+    if (item.resource === 'connections') {
+      if (visible === 'nodes') {
+        this.resourceGeneration.connections++;
+        void this.readConnection(item);
+      }
+      return;
+    }
+    if (item.resource === 'nodes') {
+      if (visible === 'nodes' || visible === 'dialogs') {
+        this.resourceGeneration.nodes++;
+        void this.readScopedNode(item);
+      }
+      return;
+    }
+    if (item.resource === 'work') {
+      if (visible === 'work') {
+        this.resourceGeneration.work++;
+        void this.readScopedWork(item);
+      }
+      return;
+    }
+    if (item.resource === 'history') {
+      if (visible === 'history') {
+        this.resourceGeneration.history++;
+        void this.readScopedHistory(item);
+      }
+      return;
+    }
+    if (item.resource === 'provider_auth') {
+      if (visible !== 'nodes') return;
+      if (this.selectedConnectionId() === item.connectionId) {
+        this.providerAuthInvalidation.set(item);
+        this.providerAuthRefreshVersion.update(value => value + 1);
+      }
+      else void this.readScopedProviderAuth(item);
+      return;
+    }
+    if (item.resource === 'node_settings') {
+      if (visible === 'nodes' && this.selectedConnectionId() === item.connectionId) {
+        this.nodeSettingsInvalidation.set(item);
+        this.nodeSettingsRefreshVersion.update(value => value + 1);
+      }
+      return;
+    }
+    if (item.resource === 'dialogs' && visible === 'dialogs' && item.entityId) this.dialogInvalidation.set(item);
+  }
+
+  lastSyncLabel(): string {
+    const value = this.lastSyncAt()[this.section()];
+    if (!value) return 'Снимок не сверен';
+    const time = new Date(value);
+    return Number.isNaN(time.getTime()) ? 'Время сверки неизвестно'
+      : `Сверено ${time.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
+  }
+
+  private markSynced(resource: RefreshTarget, value?: string | null): void {
+    this.lastSyncAt.update(current => ({ ...current, [resource]: value || new Date().toISOString() }));
+  }
+
+  private acceptsScopedRead<T>(event: Invalidation, read: ScopedRead<T>): boolean {
+    const key = this.invalidationKey(event);
+    return read.connectionId === event.connectionId && read.configEpoch === event.configEpoch &&
+      read.revision >= (this.seenInvalidations.get(key) ?? event.revision) &&
+      (!this.connectionFor(event.connectionId) || this.connectionFor(event.connectionId)?.configEpoch === event.configEpoch);
+  }
+
+  private async readConnection(event: Invalidation): Promise<void> {
+    const headers = this.headers();
+    if (!headers) return;
+    try {
+      const value = await firstValueFrom(this.http.get<Connection>(
+        `/api/connections/${encodeURIComponent(event.connectionId)}`, { headers }));
+      if (value.id !== event.connectionId || value.configEpoch !== event.configEpoch ||
+        (value.revision ?? -1) < event.revision ||
+        event.revision < (this.seenInvalidations.get(this.invalidationKey(event)) ?? event.revision)) return;
+      this.connections.update(current => {
+        const index = current.findIndex(item => item.id === value.id);
+        return index < 0 ? [...current, value] : current.map(item => item.id === value.id ? value : item);
+      });
+      this.markSynced('connections');
+    } catch (failure) {
+      if (failure instanceof HttpErrorResponse && failure.status === 404 &&
+        event.revision >= (this.seenInvalidations.get(this.invalidationKey(event)) ?? event.revision) &&
+        (!this.connectionFor(event.connectionId) || this.connectionFor(event.connectionId)?.configEpoch === event.configEpoch)) {
+        this.connections.update(current => current.filter(item => item.id !== event.connectionId));
+        this.nodes.update(current => current.filter(item => item.connectionId !== event.connectionId));
+        if (this.selectedConnectionId() === event.connectionId)
+          this.setResourceError('connections', 'Подключение удалено на сервере. Открытые правки сохранены в форме.');
+        this.markSynced('connections');
+      }
+    }
+  }
+
+  private async readScopedNode(event: Invalidation): Promise<void> {
+    const headers = this.headers();
+    if (!headers) return;
+    try {
+      const read = await firstValueFrom(this.http.get<ScopedRead<NodeProjection>>(
+        `/api/projections/nodes/${encodeURIComponent(event.connectionId)}`, { headers }));
+      if (!this.acceptsScopedRead(event, read)) return;
+      this.nodes.update(current => {
+        const retained = current.filter(item => item.connectionId !== event.connectionId);
+        return read.item ? [...retained, read.item] : retained;
+      });
+      if (read.item) {
+        this.connections.update(current => current.map(connection => connection.id === event.connectionId
+          ? { ...connection, observation: read.item!.observation, identityStatus: read.item!.identityStatus,
+            conflictingConnectionIds: read.item!.conflictingConnectionIds } : connection));
+      }
+      this.markSynced('nodes', read.syncedAt);
+    } catch { /* Keep the last confirmed snapshot until an explicit reconciliation. */ }
+  }
+
+  private async readScopedWork(event: Invalidation): Promise<void> {
+    const headers = this.headers();
+    if (!headers) return;
+    const params = event.entityId ? new HttpParams().set('requestId', event.entityId) : undefined;
+    try {
+      const read = await firstValueFrom(this.http.get<ScopedRead<WorkProjection>>(
+        `/api/projections/work/${encodeURIComponent(event.connectionId)}`, { headers, params }));
+      if (!this.acceptsScopedRead(event, read)) return;
+      this.work.update(current => {
+        const retained = current.filter(item => item.connectionId !== event.connectionId ||
+          (event.entityId !== null && event.entityId !== undefined && item.requestId !== event.entityId));
+        if (event.entityId) return read.item ? [...retained, read.item] : retained;
+        return [...retained, ...(read.items || [])];
+      });
+      this.markSynced('work', read.syncedAt);
+    } catch { /* Keep the last confirmed snapshot until an explicit reconciliation. */ }
+  }
+
+  private async readScopedHistory(event: Invalidation): Promise<void> {
+    const headers = this.headers();
+    if (!headers) return;
+    const params = event.entityId ? new HttpParams().set('requestId', event.entityId) : undefined;
+    try {
+      const read = await firstValueFrom(this.http.get<ScopedRead<HistoryProjection>>(
+        `/api/projections/history/${encodeURIComponent(event.connectionId)}`, { headers, params }));
+      if (!this.acceptsScopedRead(event, read)) return;
+      this.history.update(current => {
+        const retained = current.filter(item => item.connectionId !== event.connectionId ||
+          (event.entityId !== null && event.entityId !== undefined && item.requestId !== event.entityId));
+        if (event.entityId) return read.item ? [...retained, read.item] : retained;
+        return [...retained, ...(read.items || [])];
+      });
+      this.markSynced('history', read.syncedAt);
+    } catch { /* Keep the last confirmed snapshot until an explicit reconciliation. */ }
+  }
+
+  private async readScopedProviderAuth(event: Invalidation): Promise<void> {
+    const connection = this.connectionFor(event.connectionId);
+    const headers = this.headers();
+    if (!connection?.observation.nodeId || !headers) return;
+    try {
+      const value = await firstValueFrom(this.http.get<ProviderAuthSnapshot>(
+        `/api/connections/${encodeURIComponent(connection.id)}/provider-auth`,
+        { headers, params: new HttpParams().set('nodeId', connection.observation.nodeId).set('configEpoch', event.configEpoch) }));
+      if (connection.configEpoch !== event.configEpoch || value.nodeId !== connection.observation.nodeId ||
+        (value.resourceRevision ?? -1) < (this.seenInvalidations.get(this.invalidationKey(event)) ?? event.revision)) return;
+      this.acceptProviderAuthSnapshot(connection.id, value);
+    } catch { this.providerAuthFailures.update(current => ({ ...current, [event.connectionId]: true })); }
   }
 
   private statusCategory(status?: string | null, effectStatus?: string | null): string {
@@ -1319,14 +1523,8 @@ export class AppComponent implements OnInit, OnDestroy {
       || (nodeId && !this.looksLikeUuid(nodeId) ? nodeId : 'Нода без названия');
   }
 
-  private effectiveHeartbeatFresh(observation: Observation, connectionId?: string): boolean | null {
-    if (observation.heartbeatFresh === false) return false;
-    if (!observation.heartbeatAt) return observation.heartbeatFresh;
-    const thresholdSeconds = connectionId ? this.connectionFor(connectionId)?.staleThresholdSeconds : undefined;
-    if (!thresholdSeconds) return observation.heartbeatFresh;
-    const heartbeatTime = Date.parse(observation.heartbeatAt);
-    if (!Number.isFinite(heartbeatTime)) return observation.heartbeatFresh;
-    return this.clock() - heartbeatTime <= thresholdSeconds * 1000;
+  private effectiveHeartbeatFresh(observation: Observation, _connectionId?: string): boolean | null {
+    return observation.heartbeatFresh;
   }
 
   private looksLikeUuid(value: string): boolean { return /^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(value); }

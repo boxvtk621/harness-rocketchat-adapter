@@ -5,10 +5,10 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $compose = Join-Path $root 'compose.yaml'
 $environmentFile = Join-Path $root '.runtime/acceptance.env'
-if (-not (Test-Path $environmentFile)) { throw 'Run bootstrap.ps1 for a dedicated hl305-* acceptance project first.' }
+if (-not (Test-Path $environmentFile)) { throw 'Run bootstrap.ps1 for a dedicated hl305-* or hl320-* acceptance project first.' }
 $wiring = @{}
 Get-Content $environmentFile | ForEach-Object { if ($_ -match '^([^=]+)=(.*)$') { $wiring[$matches[1]] = $matches[2] } }
-if ($wiring.COMPOSE_PROJECT_NAME -notmatch '^hl305-[a-z0-9-]+$' -or $wiring.HL304_VOLUME_PREFIX -ne $wiring.COMPOSE_PROJECT_NAME -or $wiring.ACCEPTANCE_ISOLATED -ne 'true') { throw 'Refusing acceptance outside dedicated project/volume namespace.' }
+if ($wiring.COMPOSE_PROJECT_NAME -notmatch '^(hl305|hl320)-[a-z0-9-]+$' -or $wiring.HL304_VOLUME_PREFIX -ne $wiring.COMPOSE_PROJECT_NAME -or $wiring.ACCEPTANCE_ISOLATED -ne 'true') { throw 'Refusing acceptance outside dedicated project/volume namespace.' }
 if ($wiring.WEB_CLIENT_PORT -eq '18100' -or $wiring.WEB_KEYCLOAK_PORT -eq '18180') { throw 'Refusing working-stack ports.' }
 $composeArgs = @('compose', '--env-file', $environmentFile, '--project-directory', $root, '-f', $compose)
 $rendered = docker @composeArgs --profile harness --profile acceptance config --format json | ConvertFrom-Json
