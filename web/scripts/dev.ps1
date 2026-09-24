@@ -165,8 +165,13 @@ function Verify([string]$Release,$Before) {
             if((Invoke-WebRequest 'http://localhost:18787/realms/harness/.well-known/openid-configuration' -UseBasicParsing -TimeoutSec 5).StatusCode -ne 200){throw 'OIDC unavailable'}
             $after=Probe $project
             if(@($after.nodes|Where-Object {-not $_.available}).Count -or $after.registryError){throw 'Harness or registry API unavailable.'}
+            if(@($after.nodes|Where-Object {$_.authState -eq 'authenticated' -and $_.readiness -ne 'ready'}).Count){throw 'An authenticated Harness node is not ready.'}
             if($Before){
-                foreach($old in $Before.nodes){$new=@($after.nodes|Where-Object kind -eq $old.kind)[0];if($new.authState -ne $old.authState){throw 'Provider auth state changed; do not claim successful preservation.'}}
+                foreach($old in $Before.nodes){
+                    $new=@($after.nodes|Where-Object kind -eq $old.kind)[0]
+                    if($new.authState -ne $old.authState){throw 'Provider auth state changed; do not claim successful preservation.'}
+                    if($old.readiness -eq 'ready' -and $new.readiness -ne 'ready'){throw "Provider readiness regressed for $($old.kind): $($new.readiness)."}
+                }
                 if(($Before.registry|Sort-Object id|ConvertTo-Json -Depth 10 -Compress) -ne ($after.registry|Sort-Object id|ConvertTo-Json -Depth 10 -Compress)){throw 'Registry identity or settings changed.'}
             }
             SaveJson (Join-Path $RuntimeRoot 'last-status.json') $after
